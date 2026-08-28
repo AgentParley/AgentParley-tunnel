@@ -1,0 +1,66 @@
+# Publishes a new agentparley-tunnel release to https://tunnel-app.agentparley.ai — triggered by a git tag,
+# never by a push to main, so shipping a new binary to every customer's box on its next start is a deliberate
+# act rather than something that follows from a plain commit.
+#
+#   git tag tunnel-v1.4.2 && git push origin tunnel-v1.4.2
+#
+# Upload order is the correctness mechanism: every versioned artifact lands in S3 BEFORE latest-version does, so
+# a box reading the pointer mid-publish can only ever see the old, complete release or the new, complete one —
+# never a dangling reference to a release that isn't fully uploaded yet.
+#
+# This is the PUBLIC daemon repo. The wire contract in proto/tunnel.proto is mirrored from the server monorepo,
+# which owns it; the monorepo's own pipeline fails if the two ever drift (it reads this repo's proto over HTTPS).
+
+when:
+  - event: tag
+    ref: refs/tags/tunnel-v*
+
+steps:
+  build-and-sign:
+    image: golang:1.26.5
+    environment:
+      TUNNEL_RELEASE_SIGNING_KEY:
+        from_secret: tunnel_release_signing_key
+    commands:
+      - VERSION="${CI_COMMIT_TAG#tunnel-v}"
+      - |
+        echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+          echo "tag ${CI_COMMIT_TAG} does not have the shape tunnel-v<semver> (got version: $VERSION)"
+          exit 1
+        }
+      - test -n "$TUNNEL_RELEASE_SIGNING_KEY" || { echo "tunnel_release_signing_key secret is empty or not injected"; exit 1; }
+      # All dependencies (grpc, protobuf, yaml.v3) are pure Go — CGO off is safe and makes the binaries static.
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X github.com/agentparley/tunnel/internal/version.Version=$VERSION" -o dist/agentparley-tunnel-linux-amd64 .
+      - CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w -X github.com/agentparley/tunnel/internal/version.Version=$VERSION" -o dist/agentparley-tunnel-linux-arm64 .
+      - go run ./release/sign dist/agentparley-tunnel-linux-amd64 dist/agentparley-tunnel-linux-arm64
+      - echo "$VERSION" > dist/latest-version
+
+  publish:
+    image: amazon/aws-cli
+    depends_on: [build-and-sign]
+    environment:
+      AWS_ACCESS_KEY_ID:
+        from_secret: tunnel_release_aws_key_id
+      AWS_SECRET_ACCESS_KEY:
+        from_secret: tunnel_release_aws_secret
+      AWS_DEFAULT_REGION: us-east-1
+      BUCKET: agentparley-tunnel-releases-970652200122
+    commands:
+      - test -n "$AWS_ACCESS_KEY_ID" || { echo "tunnel_release_aws_key_id secret is empty or not injected"; exit 1; }
+      - test -n "$AWS_SECRET_ACCESS_KEY" || { echo "tunnel_release_aws_secret secret is empty or not injected"; exit 1; }
+      - VERSION="${CI_COMMIT_TAG#tunnel-v}"
+      # Versions are write-once: releases/<v>/ is served immutable+cached for a year, so overwriting it after
+      # CloudFront has already cached the old bytes leaves the fleet split on two binaries for the same version
+      # string. A re-cut release needs a new version number, not a re-push of this tag.
+      - |
+        if aws s3 ls "s3://$BUCKET/releases/$VERSION/" >/dev/null 2>&1; then
+          echo "s3://$BUCKET/releases/$VERSION/ already exists — versions are write-once, bump the version and re-tag instead of re-pushing tunnel-v$VERSION"
+          exit 1
+        fi
+      # 1. Versioned artifacts first — immutable, cached long. Six files: binary/.sha256/.sig × amd64/arm64.
+      - aws s3 cp dist/ "s3://$BUCKET/releases/$VERSION/" --recursive --exclude "*" --include "agentparley-tunnel-linux-*" --cache-control "public, max-age=31536000, immutable"
+      # 2. The scripts — short-lived cache so a fix reaches boxes running the one-liner within minutes.
+      - aws s3 cp packaging/linux/install.sh "s3://$BUCKET/install.sh" --cache-control "public, max-age=300" --content-type "text/x-shellscript"
+      - aws s3 cp packaging/linux/uninstall.sh "s3://$BUCKET/uninstall.sh" --cache-control "public, max-age=300" --content-type "text/x-shellscript"
+      # 3. The pointer, LAST — only once every binary it can point at is fully uploaded.
+      - aws s3 cp dist/latest-version "s3://$BUCKET/latest-version" --cache-control "public, max-age=300" --content-type "text/plain"

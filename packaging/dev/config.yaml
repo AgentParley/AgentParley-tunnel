@@ -1,0 +1,33 @@
+# Dev-only config for docker-compose.dev.yml's tunnel-test-host container — talks to the host machine's PlatformApi
+# (dotnet run, :5080) and the ssh-egress compose service on the shared docker network.
+server:
+  api: http://host.docker.internal:5080
+  egress: localhost:8080   # tunnel-test-host shares ssh-egress's network namespace (see docker-compose.dev.yml) —
+                            # "localhost" here really is the ssh-egress container, which is what lets `start
+                            # -insecure` stay literal-localhost-only per internal/client/dial.go.
+run_as: root
+read_only: false
+allow_commands: []   # matched against the RAW command text; "*" crosses "/" — see README's Configuration section
+deny_commands: []
+enabled: true
+
+# Local model harnesses (`agentparley-tunnel register <harness>` / `unregister <harness>`). Uncomment and adjust to
+# expose local models to AgentParley through this tunnel — see the tunnel design doc's non-agentic pin for why the
+# CLI harnesses never take arbitrary flags from config.
+# harnesses:
+#   codex:
+#     command: codex                # defaults to "codex", resolved via PATH
+#   claude:
+#     command: claude                # defaults to "claude", resolved via PATH
+#   ollama:
+#     url: http://localhost:11434    # this is the default; only needed to override
+#   openai-compatible-local:
+#     url: http://localhost:8000    # REQUIRED — vLLM/llama.cpp/LM Studio expose no fixed default. Give the
+#                                   # SERVER root, not the /v1 base an OpenAI client takes; a trailing /v1 is
+#                                   # trimmed for you since that is what everyone pastes.
+#     models:
+#       - id: my-local-model
+#         label: My local model
+#         context_window_tokens: 32768   # required whenever the server doesn't expose max_model_len
+# allow_harnesses: []   # empty = all four harnesses allowed (subject to detection succeeding on the box)
+# deny_harnesses: []    # e.g. ["codex"] to keep the codex harness off even if installed

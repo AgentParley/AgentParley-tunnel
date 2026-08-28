@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package agentparley.tunnel.v1;
+
+option csharp_namespace = "AgentParley.Cloud.SshEgress.Grpc";
+option go_package = "github.com/agentparley/tunnel/internal/proto;tunnelpb";
+
+service TunnelService {
+  // The daemon dials this with a valid access token; the egress verifies it against cached JWKS.
+  rpc Connect(stream AgentMessage) returns (stream ServerMessage);
+}
+
+message ServerMessage {
+  oneof kind {
+    Connected connected = 1;      // first server message on success
+    Operation operation = 2;
+    Shutdown shutdown = 3;        // terminal: revoked, superseded, or drained
+  }
+}
+
+message AgentMessage {
+  oneof kind {
+    Hello hello = 1;              // first agent message, always
+    OperationResult result = 2;
+    OperationError error = 3;
+    Deregister deregister = 4;
+  }
+}
+
+message Hello {
+  string machine_id = 1;
+  string agent_version = 2;
+  string run_as_user = 3;
+  string hostname = 4;
+  string operating_system = 5;
+  string architecture = 6;
+}
+message Connected { string connection_id = 1; }
+message Shutdown { string reason = 1; }
+message Deregister {}
+
+message Operation {
+  string correlation_id = 1;
+  int64  session_id = 2;          // the shell context; 0 = no session (never for agent paths)
+  int32  timeout_seconds = 3;
+  // Session.ShellStateGeneration — part of the shell state's identity, not metadata: a session-refresh command
+  // bumps this, which changes the state directory name AND must change what the far side's served-session ledger
+  // keys on, or a reset session keeps reporting IsFreshShell=false against a directory it has never touched.
+  int32  shell_state_generation = 9;
+  oneof call {
+    RunCommandCall run_command = 4;
+    ListDirectoryCall list_directory = 5;
+    ReadFileCall read_file = 6;
+    WriteFileCall write_file = 7;
+    DeleteFileCall delete_file = 8;
+    InvokeHarnessCall invoke_harness = 10;
+  }
+}
+
+// `command` arrives ALREADY wrapped by SshLoginShellWrap. The daemon must NOT wrap it again; it reproduces
+// sshd's exec contract, applies the session's working directory and environment, and runs it verbatim.
+// `policy_match_command` is the RAW, unwrapped command text the agent asked for — carried purely so the daemon's
+// local `allow_commands`/`deny_commands` policy can match against what the user actually typed, not the
+// base64-wrapped shell invocation. It is NEVER executed; `command` is the only field that ever reaches shellrun.Run.
+message RunCommandCall   { string command = 1; int32 max_output_bytes = 2; string policy_match_command = 3; }
+message ListDirectoryCall{ string path = 1; int32 max_entries = 2; }
+message ReadFileCall     { string path = 1; int64 max_bytes = 2; }
+message WriteFileCall    { string path = 1; bytes content = 2; }
+message DeleteFileCall   { string path = 1; }
+
+// The daemon resolves `harness` from its OWN local config/defaults only — the platform never sends a URL, path,
+// flag, or argv fragment (no SSRF/exec pivot). An invocation MUST be side-effect-free on the box: CLI harnesses
+// are always run pinned to non-agentic, tool-free modes by the daemon's fixed argv, never the box's local config.
+message InvokeHarnessCall { string harness = 1; string model = 2; string payload = 3; }
+
+message OperationResult {
+  string correlation_id = 1;
+  bool   is_fresh_shell = 2;      // a context was CREATED, not resumed — surfaced to the model
+  oneof result {
+    RunCommandResult run_command = 3;
+    ListDirectoryResult list_directory = 4;
+    ReadFileResult read_file = 5;
+    WriteFileResult write_file = 6;
+    DeleteFileResult delete_file = 7;
+    InvokeHarnessResult invoke_harness = 8;
+  }
+}
+
+message RunCommandResult { int32 exit_code = 1; string output = 2; string error_output = 3; bool is_truncated = 4; int32 duration_ms = 5; }
+message ListDirectoryResult { string path = 1; repeated DirectoryEntry entries = 2; bool is_truncated = 3; }
+message DirectoryEntry { string name = 1; bool is_directory = 2; int64 size_bytes = 3; int64 modified_unix_ms = 4; }
+message ReadFileResult { string path = 1; bytes content = 2; bool is_too_large = 3; int64 size_bytes = 4; }
+message WriteFileResult {}
+message DeleteFileResult {}
+// status_code is the local HTTP status (server family) or process exit code (CLI family) — NOT a uniform
+// "0 is good" convention across families; payload is stdout / response body verbatim — the daemon never
+// interprets it, C# owns all interpretation.
+message InvokeHarnessResult { string payload = 1; int32 status_code = 2; string error_output = 3; }
+
+// code mirrors SshOperationException.Code exactly, plus the connect-time codes the egress adds:
+// file_not_found | permission_denied | is_directory | timeout | too_large | policy_denied |
+// connect_failed | host_key_mismatch | blocked_address | not_connected | internal | harness_unavailable
+message OperationError { string correlation_id = 1; string code = 2; string message = 3; }
