@@ -50,7 +50,7 @@ func runKeygen() {
 	fmt.Println()
 	fmt.Println("Put the private key in the Woodpecker secret tunnel_release_signing_key AND an offline backup " +
 		"(password manager) — losing both means every existing install must be manually re-installed to trust a " +
-		"new key. Put the public key in ssh-tunnel-apps/internal/selfupdate/publickey.go.")
+		"new key. Put the public key in internal/selfupdate/publickey.go.")
 }
 
 func runSign(paths []string) error {

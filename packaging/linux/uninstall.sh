@@ -1,7 +1,7 @@
 #!/bin/sh
 # The exact inverse of install.sh, hosted the same way it is:
 #
-#   curl -fsSL https://tunnel-app.agentparley.ai/uninstall.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/AgentParley/AgentParley-tunnel/main/packaging/linux/uninstall.sh | sudo sh
 #
 # Does NOT delete the run-as user by default (it may be a pre-existing account with a home directory the
 # operator wants kept) — set AGENTPARLEY_TUNNEL_DELETE_USER=true (or pass --delete-user if run from a downloaded

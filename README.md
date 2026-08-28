@@ -9,8 +9,9 @@ installing before the one-liner runs it. The tunnel **wire contract** (`proto/tu
 AgentParley server, which owns it; a CI check on the server side fails if the two ever drift, so this copy always
 matches what the egress speaks.
 
-**Releases** are cut by tagging `tunnel-v<semver>`; CI cross-compiles, signs each binary with the release key, and
-publishes to `https://tunnel-app.agentparley.ai`, where `install.sh` and the daemon's self-update fetch them.
+**Install** is `curl -fsSL <this repo's raw install.sh> | sudo sh` — the script you pipe to `sh` is the file in
+this repo. **Releases** are cut by tagging `tunnel-v<semver>`; CI cross-compiles, signs each binary, and publishes
+them to `https://tunnel-app.agentparley.ai`, where install.sh and the daemon's self-update fetch the signed binary.
 
 This README covers only what someone running the daemon needs.
 
@@ -36,7 +37,7 @@ this daemon  --outbound gRPC-->  SSH egress service  <--Runtime posts commands h
 ## Install
 
 ```bash
-curl -fsSL https://tunnel-app.agentparley.ai/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/AgentParley/AgentParley-tunnel/main/packaging/linux/install.sh | sudo sh
 sudo -u <run-as-user> agentparley-tunnel login
 sudo systemctl start agentparley-tunnel
 ```
@@ -58,14 +59,14 @@ A piped script has no arguments, so every override is an environment variable:
 | `AGENTPARLEY_TUNNEL_UPDATE_SERVER` | `https://tunnel-app.agentparley.ai` | where both install.sh and the daemon's self-update check for new releases; written into `config.yaml` as `update_server` only when overridden |
 | `AGENTPARLEY_TUNNEL_BINARY` | (unset) | path to a locally built binary — skips the download and checksum entirely, for a dev/checkout install |
 
-Example: `curl -fsSL https://tunnel-app.agentparley.ai/install.sh | sudo AGENTPARLEY_TUNNEL_USER=deploy sh`
+Example: `curl -fsSL https://raw.githubusercontent.com/AgentParley/AgentParley-tunnel/main/packaging/linux/install.sh | sudo AGENTPARLEY_TUNNEL_USER=deploy sh`
 
 Re-running the installer on an already-installed box is safe and doubles as a manual update: the binary and
 systemd unit are refreshed, `config.yaml` and the box's credentials are left alone. If the service is currently
 running, it keeps running the old binary until you `sudo systemctl restart agentparley-tunnel` — the installer
 says so when this applies.
 
-`uninstall.sh` (hosted the same way, `curl -fsSL https://tunnel-app.agentparley.ai/uninstall.sh | sudo sh`) is the
+`uninstall.sh` (served the same way, `curl -fsSL https://raw.githubusercontent.com/AgentParley/AgentParley-tunnel/main/packaging/linux/uninstall.sh | sudo sh`) is the
 exact inverse; it does NOT delete the run-as user by default. Set `AGENTPARLEY_TUNNEL_DELETE_USER=true` (or pass
 `--delete-user` if you downloaded the script first) to also remove the user install.sh created.
 
@@ -95,7 +96,7 @@ git tag tunnel-v1.4.2
 git push origin tunnel-v1.4.2
 ```
 
-This fires `.woodpecker/tunnel-release.yaml`, which cross-compiles amd64 + arm64 with the version stamped in via
+This fires `.woodpecker.yaml`, which cross-compiles amd64 + arm64 with the version stamped in via
 `-ldflags -X .../internal/version.Version=1.4.2`, signs both binaries (`release/sign`, Ed25519, key from the
 `tunnel_release_signing_key` Woodpecker secret), and uploads to the bucket behind `tunnel-app.agentparley.ai` —
 the versioned artifacts first, `latest-version` last, so a box can never observe a half-published release. Every
@@ -119,7 +120,6 @@ alert this warrants lives in Grafana, not in this daemon).
 ### The signing key ceremony (one-time, or on a planned rotation)
 
 ```bash
-cd ssh-tunnel-apps
 go run ./release/sign -keygen
 ```
 

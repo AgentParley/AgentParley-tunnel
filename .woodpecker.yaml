@@ -59,8 +59,7 @@ steps:
         fi
       # 1. Versioned artifacts first — immutable, cached long. Six files: binary/.sha256/.sig × amd64/arm64.
       - aws s3 cp dist/ "s3://$BUCKET/releases/$VERSION/" --recursive --exclude "*" --include "agentparley-tunnel-linux-*" --cache-control "public, max-age=31536000, immutable"
-      # 2. The scripts — short-lived cache so a fix reaches boxes running the one-liner within minutes.
-      - aws s3 cp packaging/linux/install.sh "s3://$BUCKET/install.sh" --cache-control "public, max-age=300" --content-type "text/x-shellscript"
-      - aws s3 cp packaging/linux/uninstall.sh "s3://$BUCKET/uninstall.sh" --cache-control "public, max-age=300" --content-type "text/x-shellscript"
-      # 3. The pointer, LAST — only once every binary it can point at is fully uploaded.
+      # install.sh / uninstall.sh are NOT uploaded here — they are served straight from this public repo
+      # (raw.githubusercontent.com/.../packaging/linux/), so the script people pipe to sh is the auditable repo file.
+      # 2. The pointer, LAST — only once every binary it can point at is fully uploaded.
       - aws s3 cp dist/latest-version "s3://$BUCKET/latest-version" --cache-control "public, max-age=300" --content-type "text/plain"

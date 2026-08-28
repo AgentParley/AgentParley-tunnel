@@ -1,7 +1,7 @@
 #!/bin/sh
 # Hosted, argument-free installer for the agentparley-tunnel daemon.
 #
-#   curl -fsSL https://tunnel-app.agentparley.ai/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/AgentParley/AgentParley-tunnel/main/packaging/linux/install.sh | sudo sh
 #
 # A piped script has no argv, so every override is an environment variable — see the README for the full list
 # (AGENTPARLEY_TUNNEL_USER, AGENTPARLEY_TUNNEL_API_SERVER, AGENTPARLEY_TUNNEL_EGRESS_SERVER,
@@ -24,7 +24,8 @@ UNIT_NAME="agentparley-tunnel.service"
 
 DEFAULT_API_SERVER="https://app.agentparley.ai"
 DEFAULT_EGRESS_SERVER="ssh-tunnel.agentparley.ai:443"
-DEFAULT_UPDATE_SERVER="https://tunnel-app.agentparley.ai"
+DEFAULT_UPDATE_SERVER="https://tunnel-app.agentparley.ai"   # where the SIGNED BINARY is fetched from
+INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/AgentParley/AgentParley-tunnel/main/packaging/linux/install.sh"   # where THIS script is served (the public repo, auditable)
 
 log() {
 	echo "$@"
@@ -37,7 +38,7 @@ fail() {
 
 check_root() {
 	if [ "$(id -u)" -ne 0 ]; then
-		fail "install.sh must run as root: curl -fsSL $DEFAULT_UPDATE_SERVER/install.sh | sudo sh"
+		fail "install.sh must run as root: curl -fsSL $INSTALL_SCRIPT_URL | sudo sh"
 	fi
 }
 
@@ -74,7 +75,7 @@ resolve_run_as_user() {
 	if [ -z "$RUN_AS_USER" ] || [ "$RUN_AS_USER" = "root" ]; then
 		echo "no run-as user could be determined (ran as root directly, with no SUDO_USER) — the daemon has no" >&2
 		echo "privilege to switch users, so it must run as, and only as, the account whose behalf commands run on." >&2
-		fail "re-run as: curl -fsSL $DEFAULT_UPDATE_SERVER/install.sh | sudo AGENTPARLEY_TUNNEL_USER=<name> sh"
+		fail "re-run as: curl -fsSL $INSTALL_SCRIPT_URL | sudo AGENTPARLEY_TUNNEL_USER=<name> sh"
 	fi
 }
 
