@@ -164,7 +164,8 @@ func (d *Daemon) dispatchListDirectory(correlationID string, isFreshShell bool, 
 		maxEntries = defaultMaxListEntries
 	}
 
-	entries, isTruncated, err := files.List(call.GetPath(), maxEntries)
+	resolvedPath := files.Resolve(call.GetPath(), d.runAsUser.Home)
+	entries, isTruncated, err := files.List(resolvedPath, maxEntries)
 	if err != nil {
 		return errorMessageFrom(correlationID, err)
 	}
@@ -183,7 +184,7 @@ func (d *Daemon) dispatchListDirectory(correlationID string, isFreshShell bool, 
 		CorrelationId: correlationID,
 		IsFreshShell:  isFreshShell,
 		Result: &tunnelpb.OperationResult_ListDirectory{ListDirectory: &tunnelpb.ListDirectoryResult{
-			Path:        call.GetPath(),
+			Path:        resolvedPath,
 			Entries:     wireEntries,
 			IsTruncated: isTruncated,
 		}},
@@ -196,7 +197,8 @@ func (d *Daemon) dispatchReadFile(correlationID string, isFreshShell bool, call 
 		maxBytes = defaultMaxReadWriteBytes
 	}
 
-	content, isTooLarge, sizeBytes, err := files.Read(call.GetPath(), maxBytes)
+	resolvedPath := files.Resolve(call.GetPath(), d.runAsUser.Home)
+	content, isTooLarge, sizeBytes, err := files.Read(resolvedPath, maxBytes)
 	if err != nil {
 		return errorMessageFrom(correlationID, err)
 	}
@@ -205,7 +207,7 @@ func (d *Daemon) dispatchReadFile(correlationID string, isFreshShell bool, call 
 		CorrelationId: correlationID,
 		IsFreshShell:  isFreshShell,
 		Result: &tunnelpb.OperationResult_ReadFile{ReadFile: &tunnelpb.ReadFileResult{
-			Path:       call.GetPath(),
+			Path:       resolvedPath,
 			Content:    content,
 			IsTooLarge: isTooLarge,
 			SizeBytes:  sizeBytes,
@@ -219,7 +221,8 @@ func (d *Daemon) dispatchWriteFile(correlationID string, isFreshShell bool, call
 		return errorMessage(correlationID, errorCodeTooLarge, fmt.Sprintf("write exceeds the %d byte limit", maxWriteFileBytes))
 	}
 
-	if err := files.Write(call.GetPath(), call.GetContent()); err != nil {
+	resolvedPath := files.Resolve(call.GetPath(), d.runAsUser.Home)
+	if err := files.Write(resolvedPath, call.GetContent()); err != nil {
 		return errorMessageFrom(correlationID, err)
 	}
 
@@ -231,7 +234,8 @@ func (d *Daemon) dispatchWriteFile(correlationID string, isFreshShell bool, call
 }
 
 func (d *Daemon) dispatchDeleteFile(correlationID string, isFreshShell bool, call *tunnelpb.DeleteFileCall) *tunnelpb.AgentMessage {
-	if err := files.Delete(call.GetPath()); err != nil {
+	resolvedPath := files.Resolve(call.GetPath(), d.runAsUser.Home)
+	if err := files.Delete(resolvedPath); err != nil {
 		return errorMessageFrom(correlationID, err)
 	}
 

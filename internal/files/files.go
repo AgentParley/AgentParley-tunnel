@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // Error codes mirror SshOperationException.Code exactly — see tunnel.proto's OperationError comment.
@@ -41,6 +42,26 @@ type Entry struct {
 	IsDirectory  bool
 	SizeBytes    int64
 	ModifiedUnix int64
+}
+
+// Resolve turns an agent-supplied path into an absolute one the way a real SSH/SFTP session would: a bare "~" or a
+// leading "~/" expands to the run-as user's home; a relative path is taken FROM that home (matching sshd's default
+// working directory — and the Direct-SSH egress, whose SFTP client starts in home — so the two host kinds agree);
+// an absolute path is used as given. The result is cleaned. os operations here don't expand "~" or root relatives
+// at home on their own (that is shell behaviour), which is why run_command — run through a login shell in home —
+// accepts "~/x" while the file ops did not until this resolved the path first. Traversal is intentionally not fenced
+// (see the package comment): the OS permission model is the boundary, exactly as over real SSH.
+func Resolve(rawPath, homeDir string) string {
+	switch {
+	case rawPath == "~":
+		return homeDir
+	case strings.HasPrefix(rawPath, "~/"):
+		return filepath.Join(homeDir, rawPath[len("~/"):])
+	case filepath.IsAbs(rawPath):
+		return filepath.Clean(rawPath)
+	default:
+		return filepath.Join(homeDir, rawPath)
+	}
 }
 
 // List returns up to maxEntries entries of path, sorted by name for stable output across calls. IsTruncated is set
