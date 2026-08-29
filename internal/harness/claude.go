@@ -89,7 +89,7 @@ func (h *claudeHarness) ListModels(ctx context.Context) ([]Model, error) {
 }
 
 func (h *claudeHarness) Invoke(ctx context.Context, model, payload string) (InvokeOutcome, error) {
-	prompt, systemPrompt, err := parseClaudeCodexPayload(payload)
+	prompt, systemPrompt, _, err := parseClaudeCodexPayload(payload)
 	if err != nil {
 		return InvokeOutcome{}, err
 	}

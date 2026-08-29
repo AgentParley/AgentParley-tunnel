@@ -25,22 +25,25 @@ const maxCLIErrorOutputBytes = 64 * 1024
 // distinct from whatever deadline the caller's ctx carries.
 const capabilityProbeTimeout = 30 * time.Second
 
-// cliPayload is the wire shape both CLI harnesses accept: {"prompt": "...", "systemPrompt": "..." | omitted}.
-// Codex never sets systemPrompt — its system content is folded into prompt by the C# side.
+// cliPayload is the wire shape both CLI harnesses accept: {"prompt": "...", "systemPrompt": "..." | omitted,
+// "output_schema": "..." | omitted}. Codex never sets systemPrompt — its system content is folded into prompt by
+// the C# side. output_schema is codex-only: a JSON Schema string the C# side supplies so codex's reply is forced
+// (via `--output-schema`, i.e. OpenAI structured output) into the platform's tool-call envelope; claude ignores it.
 type cliPayload struct {
 	Prompt       string `json:"prompt"`
 	SystemPrompt string `json:"systemPrompt"`
+	OutputSchema string `json:"output_schema"`
 }
 
-func parseClaudeCodexPayload(payload string) (prompt, systemPrompt string, err error) {
+func parseClaudeCodexPayload(payload string) (prompt, systemPrompt, outputSchema string, err error) {
 	var decoded cliPayload
 	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
-		return "", "", fmt.Errorf("invoke payload is not valid JSON: %w", err)
+		return "", "", "", fmt.Errorf("invoke payload is not valid JSON: %w", err)
 	}
 	if decoded.Prompt == "" {
-		return "", "", errors.New("invoke payload is missing a non-empty \"prompt\"")
+		return "", "", "", errors.New("invoke payload is missing a non-empty \"prompt\"")
 	}
-	return decoded.Prompt, decoded.SystemPrompt, nil
+	return decoded.Prompt, decoded.SystemPrompt, decoded.OutputSchema, nil
 }
 
 // resolveCLIModels applies the CLI family's "replaced wholesale" config rule: an empty overrides list means the

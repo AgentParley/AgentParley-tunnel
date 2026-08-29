@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -87,12 +88,40 @@ func (h *codexHarness) ListModels(ctx context.Context) ([]Model, error) {
 }
 
 func (h *codexHarness) Invoke(ctx context.Context, model, payload string) (InvokeOutcome, error) {
-	prompt, _, err := parseClaudeCodexPayload(payload)
+	prompt, _, outputSchema, err := parseClaudeCodexPayload(payload)
 	if err != nil {
 		return InvokeOutcome{}, err
 	}
 
-	return runCLI(ctx, h.command, codexArgs(), prompt)
+	args := codexArgs()
+	// output_schema forces codex's reply into the platform's tool-call envelope via OpenAI structured output — the
+	// reliable replacement for the fenced-JSON-in-prose convention, which a frontier model still fought under the
+	// non-agentic pin. The schema lives on the C# side (single source of truth); the daemon only materializes it to
+	// a file because --output-schema takes a path.
+	if outputSchema != "" {
+		schemaPath, cleanup, err := writeOutputSchemaFile(outputSchema)
+		if err != nil {
+			return InvokeOutcome{}, err
+		}
+		defer cleanup()
+		args = append(args, "--output-schema", schemaPath)
+	}
+
+	return runCLI(ctx, h.command, args, prompt)
+}
+
+func writeOutputSchemaFile(schema string) (path string, cleanup func(), err error) {
+	file, err := os.CreateTemp("", "codex-output-schema-*.json")
+	if err != nil {
+		return "", nil, fmt.Errorf("creating codex output-schema temp file: %w", err)
+	}
+	if _, err := file.WriteString(schema); err != nil {
+		file.Close()
+		os.Remove(file.Name())
+		return "", nil, fmt.Errorf("writing codex output-schema: %w", err)
+	}
+	file.Close()
+	return file.Name(), func() { os.Remove(file.Name()) }, nil
 }
 
 // codexArgs is the FIXED, daemon-owned argv for every codex invocation (Detect's probe and Invoke alike) — never
