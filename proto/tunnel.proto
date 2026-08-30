@@ -15,6 +15,7 @@ message ServerMessage {
     Connected connected = 1;      // first server message on success
     Operation operation = 2;
     Shutdown shutdown = 3;        // terminal: revoked, superseded, or drained
+    WorkspaceResult workspace_result = 4;
   }
 }
 
@@ -24,6 +25,7 @@ message AgentMessage {
     OperationResult result = 2;
     OperationError error = 3;
     Deregister deregister = 4;
+    WorkspaceCall workspace_call = 5;
   }
 }
 
@@ -101,3 +103,38 @@ message InvokeHarnessResult { string payload = 1; int32 status_code = 2; string 
 // file_not_found | permission_denied | is_directory | timeout | too_large | policy_denied |
 // connect_failed | host_key_mismatch | blocked_address | not_connected | internal | harness_unavailable
 message OperationError { string correlation_id = 1; string code = 2; string message = 3; }
+
+// Host-initiated workspace bridge (the `agentparley ws` subcommand). Unlike Operation (platform-initiated), these
+// originate on the host: a command running on the box asks the platform for a presigned URL to read/write a
+// workspace file. The bytes themselves travel host<->S3 directly on that URL; only these tiny control messages ride
+// the tunnel. session_id is a non-secret default-agent hint (0 = a human shell with no session); agent_selector
+// (agent id or slug) overrides it, always resolved within THIS host's account server-side.
+message WorkspaceCall {
+  string call_id = 1;
+  int64  session_id = 2;         // 0 = no session context (a human shell)
+  string agent_selector = 3;     // "" = default to the session's agent; else agent id or slug
+  oneof op {
+    WorkspaceReadOpen   read_open    = 4;
+    WorkspaceWriteBegin write_begin  = 5;
+    WorkspaceWriteCommit write_commit = 6;
+  }
+}
+message WorkspaceReadOpen    { string path = 1; }
+message WorkspaceWriteBegin  { string path = 1; int64 size_bytes = 2; }
+message WorkspaceWriteCommit { string path = 1; int64 upload_token = 2; string content_hash = 3; }
+
+message WorkspaceResult {
+  string call_id = 1;
+  oneof outcome {
+    WorkspaceReadTarget  read_target  = 2;
+    WorkspaceWriteTarget write_target = 3;
+    WorkspaceCommitted   committed    = 4;
+    WorkspaceCallError   error        = 5;
+  }
+}
+message WorkspaceReadTarget  { string url = 1; }
+message WorkspaceWriteTarget { string url = 1; map<string,string> fields = 2; int64 upload_token = 3; }
+message WorkspaceCommitted   { string display_path = 1; int64 size_bytes = 2; }
+// codes: unknown_host | no_agent | agent_not_found | session_not_found | invalid_path | file_not_found |
+//        too_large | storage_limit | conflict | upload_invalid | not_connected | timeout | busy | internal
+message WorkspaceCallError   { string code = 1; string message = 2; }

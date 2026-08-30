@@ -64,6 +64,8 @@ type Daemon struct {
 	runAsUser          *shellrun.User
 	logger             *log.Logger
 	operationSemaphore chan struct{}
+	workspaceSocketPath string
+	workspaceBridge     *workspaceBridge
 }
 
 func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.Store, tunnelConfig *config.Config, runAsUser *shellrun.User) *Daemon {
@@ -71,6 +73,8 @@ func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.S
 	if maxConcurrentOperations <= 0 {
 		maxConcurrentOperations = defaultMaxConcurrentOperations
 	}
+
+	workspaceSocketPath := sessions.WorkspaceSocketPath(runAsUser.Home)
 
 	return &Daemon{
 		apiBaseURL:         apiBaseURL,
@@ -83,6 +87,8 @@ func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.S
 		runAsUser:          runAsUser,
 		logger:             log.Default(),
 		operationSemaphore: make(chan struct{}, maxConcurrentOperations),
+		workspaceSocketPath: workspaceSocketPath,
+		workspaceBridge:     newWorkspaceBridge(workspaceSocketPath, log.Default()),
 	}
 }
 
@@ -97,6 +103,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	go d.runLedgerSweep(ctx)
+	go d.workspaceBridge.serveSocket(ctx)
 
 	reconnectDelay := newBackoff(maxReconnectBackoffSeconds)
 	for {
@@ -200,6 +207,11 @@ func (d *Daemon) serve(ctx context.Context, stream tunnelpb.TunnelService_Connec
 	defer cancelStream()
 	go d.runWriter(stream, sendQueue, sendErrors, done)
 
+	// Bind the workspace bridge to THIS stream so host-initiated `agentparley ws` calls ride it; clearStream on
+	// return fails any in-flight bridge call with not_connected rather than letting it hang to its own timeout.
+	d.workspaceBridge.setStream(sendQueue, done)
+	defer d.workspaceBridge.clearStream()
+
 	received := make(chan *tunnelpb.ServerMessage, receivedQueueDepth)
 	recvErrors := make(chan error, 1)
 	go func() {
@@ -238,6 +250,8 @@ func (d *Daemon) serve(ctx context.Context, stream tunnelpb.TunnelService_Connec
 				go d.handleOperation(streamCtx, kind.Operation, sendQueue, done)
 			case *tunnelpb.ServerMessage_Shutdown:
 				return fmt.Errorf("server closed the connection: %s", kind.Shutdown.GetReason())
+			case *tunnelpb.ServerMessage_WorkspaceResult:
+				d.workspaceBridge.deliver(kind.WorkspaceResult)
 			}
 		}
 	}

@@ -55,6 +55,8 @@ func main() {
 		err = runUnregister(os.Args[2:])
 	case "self-update":
 		err = runSelfUpdate(os.Args[2:])
+	case "ws":
+		err = runWs(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -70,7 +72,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: agentparley-tunnel <login|start|status|logout|register|unregister|self-update> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: agentparley-tunnel <login|start|status|logout|register|unregister|self-update|ws> [flags]")
 }
 
 func runLogin(args []string) error {

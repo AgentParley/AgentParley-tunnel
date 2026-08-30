@@ -183,6 +183,14 @@ func stateRoot(homeDir string) string {
 	return filepath.Join(homeDir, ".agentparley")
 }
 
+// WorkspaceSocketPath is the fixed unix socket the daemon serves for the `agentparley ws` bridge and injects as
+// AGENTPARLEY_WS_SOCKET into every run-command's environment. It sits under the same tmpfs-first state root as the
+// session shell state, so the daemon (serving it) and a `ws` child (or a human shell falling back to this path)
+// agree on one location for the same uid, and it inherits that root's 0700 ownership.
+func WorkspaceSocketPath(homeDir string) string {
+	return filepath.Join(stateRoot(homeDir), "ws.sock")
+}
+
 // isUsableRoot creates path (0700) if needed and confirms this process can actually write into it — MkdirAll alone
 // reports success for a directory that exists but isn't writable by this uid (e.g. another user's leftover
 // /dev/shm entry), which would otherwise silently strand the ledger and state in different places.

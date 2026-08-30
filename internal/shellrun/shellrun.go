@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"syscall"
 	"time"
@@ -27,7 +28,7 @@ const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bi
 // Timeout enforcement kills the whole process group, not just the direct child, because the wrap text backgrounds
 // nothing itself but the agent's OWN command might (a stray `sleep 600 &`), and a lone SIGKILL to the shell would
 // orphan it.
-func Run(ctx context.Context, user *User, command string, timeoutSeconds, maxOutputBytes int) (*Result, error) {
+func Run(ctx context.Context, user *User, command string, timeoutSeconds, maxOutputBytes int, sessionID int64, workspaceSocketPath string) (*Result, error) {
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
@@ -44,6 +45,15 @@ func Run(ctx context.Context, user *User, command string, timeoutSeconds, maxOut
 		"USER=" + user.Username,
 		"LOGNAME=" + user.Username,
 		"PATH=" + defaultPath,
+	}
+	// The `agentparley ws` bridge reads these to reach the local daemon socket and default to this session's agent;
+	// a nohup'd background job inherits them, so ws keeps working after the turn ends. session id 0 = no session
+	// context (never injected). Neither is a bearer secret: the socket's 0600 perms are the local trust boundary.
+	if workspaceSocketPath != "" {
+		cmd.Env = append(cmd.Env, "AGENTPARLEY_WS_SOCKET="+workspaceSocketPath)
+	}
+	if sessionID != 0 {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("AGENTPARLEY_SESSION_ID=%d", sessionID))
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
