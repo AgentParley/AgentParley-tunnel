@@ -1,7 +1,7 @@
 #!/bin/sh
 # Hosted, argument-free installer for the agentparley-tunnel daemon.
 #
-#   curl -fsSL https://raw.githubusercontent.com/AgentParley/AgentParley-tunnel/main/packaging/linux/install.sh | sudo sh
+#   curl -fsSL https://get.agentparley.ai/tunnel/install.sh | sudo sh
 #
 # A piped script has no argv, so every override is an environment variable — see the README for the full list
 # (AGENTPARLEY_TUNNEL_USER, AGENTPARLEY_TUNNEL_API_SERVER, AGENTPARLEY_TUNNEL_EGRESS_SERVER,
@@ -24,8 +24,8 @@ UNIT_NAME="agentparley-tunnel.service"
 
 DEFAULT_API_SERVER="https://app.agentparley.ai"
 DEFAULT_EGRESS_SERVER="ssh-tunnel.agentparley.ai:443"
-DEFAULT_UPDATE_SERVER="https://tunnel-app.agentparley.ai"   # where the SIGNED BINARY is fetched from
-INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/AgentParley/AgentParley-tunnel/main/packaging/linux/install.sh"   # where THIS script is served (the public repo, auditable)
+DEFAULT_UPDATE_SERVER="https://get.agentparley.ai"   # where the binary + its checksum are fetched from
+INSTALL_SCRIPT_URL="https://get.agentparley.ai/tunnel/install.sh"   # where THIS script is served; published from this repo, which stays its source of truth
 
 log() {
 	echo "$@"

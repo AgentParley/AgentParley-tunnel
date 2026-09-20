@@ -9,9 +9,10 @@ installing before the one-liner runs it. The tunnel **wire contract** (`proto/tu
 AgentParley server, which owns it; a CI check on the server side fails if the two ever drift, so this copy always
 matches what the egress speaks.
 
-**Install** is `curl -fsSL <this repo's raw install.sh> | sudo sh` — the script you pipe to `sh` is the file in
-this repo. **Releases** are cut by tagging `tunnel-v<semver>`; CI cross-compiles, signs each binary, and publishes
-them to `https://tunnel-app.agentparley.ai`, where install.sh and the daemon's self-update fetch the signed binary.
+**Install** is `curl -fsSL https://get.agentparley.ai/tunnel/install.sh | sudo sh`. That script is published from
+`packaging/linux/install.sh` in this repo, which stays its source of truth. **Releases** are cross-compiled for
+amd64 + arm64 and published to `https://get.agentparley.ai`, where install.sh and the daemon's self-update fetch
+the binary and verify it against its `.sha256` sidecar.
 
 This README covers only what someone running the daemon needs.
 
@@ -37,13 +38,13 @@ this daemon  --outbound gRPC-->  SSH egress service  <--Runtime posts commands h
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AgentParley/AgentParley-tunnel/main/packaging/linux/install.sh | sudo sh
+curl -fsSL https://get.agentparley.ai/tunnel/install.sh | sudo sh
 sudo -u <run-as-user> agentparley-tunnel login
 sudo systemctl start agentparley-tunnel
 ```
 
 No checkout, no flags. `install.sh` detects the machine's CPU (x86-64 or ARM64), downloads the matching binary
-from `tunnel-app.agentparley.ai`, verifies its SHA-256 checksum, creates the run-as user if it doesn't already
+from `get.agentparley.ai`, verifies its SHA-256 checksum, creates the run-as user if it doesn't already
 exist (defaulting to whichever account ran `sudo`), writes `/etc/agentparley-tunnel/config.yaml`, creates
 `/var/lib/agentparley-tunnel` (0700, owned by the run-as user), installs the systemd unit, and enables it. It does
 NOT run `login` for you — approving a new install is a deliberate, interactive step (open the printed URL, type the
@@ -56,17 +57,17 @@ A piped script has no arguments, so every override is an environment variable:
 | `AGENTPARLEY_TUNNEL_USER` | `$SUDO_USER` | the OS account the daemon runs as |
 | `AGENTPARLEY_TUNNEL_API_SERVER` | `https://app.agentparley.ai` | the PlatformApi the daemon logs in / refreshes against |
 | `AGENTPARLEY_TUNNEL_EGRESS_SERVER` | `ssh-tunnel.agentparley.ai:443` | the SSH egress service the daemon connects out to |
-| `AGENTPARLEY_TUNNEL_UPDATE_SERVER` | `https://tunnel-app.agentparley.ai` | where both install.sh and the daemon's self-update check for new releases; written into `config.yaml` as `update_server` only when overridden |
+| `AGENTPARLEY_TUNNEL_UPDATE_SERVER` | `https://get.agentparley.ai` | where both install.sh and the daemon's self-update check for new releases; written into `config.yaml` as `update_server` only when overridden |
 | `AGENTPARLEY_TUNNEL_BINARY` | (unset) | path to a locally built binary — skips the download and checksum entirely, for a dev/checkout install |
 
-Example: `curl -fsSL https://raw.githubusercontent.com/AgentParley/AgentParley-tunnel/main/packaging/linux/install.sh | sudo AGENTPARLEY_TUNNEL_USER=deploy sh`
+Example: `curl -fsSL https://get.agentparley.ai/tunnel/install.sh | sudo AGENTPARLEY_TUNNEL_USER=deploy sh`
 
 Re-running the installer on an already-installed box is safe and doubles as a manual update: the binary and
 systemd unit are refreshed, `config.yaml` and the box's credentials are left alone. If the service is currently
 running, it keeps running the old binary until you `sudo systemctl restart agentparley-tunnel` — the installer
 says so when this applies.
 
-`uninstall.sh` (served the same way, `curl -fsSL https://raw.githubusercontent.com/AgentParley/AgentParley-tunnel/main/packaging/linux/uninstall.sh | sudo sh`) is the
+`uninstall.sh` (served the same way, `curl -fsSL https://get.agentparley.ai/tunnel/uninstall.sh | sudo sh`) is the
 exact inverse; it does NOT delete the run-as user by default. Set `AGENTPARLEY_TUNNEL_DELETE_USER=true` (or pass
 `--delete-user` if you downloaded the script first) to also remove the user install.sh created.
 
@@ -77,9 +78,8 @@ Every time the systemd unit starts (including every `Restart=always` restart), i
 
 - Fetches `<update_server>/latest-version`. If it differs from the version currently installed — not just
   "newer": a deliberately older value is how rollback works — it downloads the matching binary plus its
-  `.sha256` and `.sig` sidecars, verifies BOTH the checksum and an Ed25519 signature (public key baked into the
-  binary at build time), and atomically swaps it into place.
-- Any failure anywhere in this — network down, a 404, a bad checksum, a bad signature, disk full — is logged to
+  `.sha256` sidecar, verifies the checksum, and atomically swaps it into place.
+- Any failure anywhere in this — network down, a 404, a bad checksum, disk full — is logged to
   the journal and the check exits 0. Self-update is fail-open: a broken update check must never stop the tunnel
   from starting on the binary that's already there.
 - Set `auto_update: false` in `config.yaml` to turn this off entirely (change-controlled environments may want
@@ -97,8 +97,8 @@ git push origin tunnel-v1.4.2
 ```
 
 This fires `.woodpecker.yaml`, which cross-compiles amd64 + arm64 with the version stamped in via
-`-ldflags -X .../internal/version.Version=1.4.2`, signs both binaries (`release/sign`, Ed25519, key from the
-`tunnel_release_signing_key` Woodpecker secret), and uploads to the bucket behind `tunnel-app.agentparley.ai` —
+`-ldflags -X .../internal/version.Version=1.4.2`, writes each binary's `.sha256` sidecar, and uploads to the
+bucket behind `get.agentparley.ai` —
 the versioned artifacts first, `latest-version` last, so a box can never observe a half-published release. Every
 release folder (`releases/<version>/`) is kept forever; only `latest-version` moves.
 
@@ -117,28 +117,9 @@ box crash-looping on the bad release — `self-update` runs on every `Restart=al
 self-heals without anyone touching individual machines. Watch for a drop in connected tunnels after a publish (the
 alert this warrants lives in Grafana, not in this daemon).
 
-### The signing key ceremony (one-time, or on a planned rotation)
-
-```bash
-go run ./release/sign -keygen
-```
-
-Prints a private and a public key. The private key goes into the `tunnel_release_signing_key` Woodpecker secret
-**and** into a password manager as an offline backup — losing both copies means no future release can be trusted
-by an existing install; every customer would have to re-run `install.sh` (checksum-only trust) to pick up a new
-key. The public key is baked into `internal/selfupdate/publickey.go` and shipped in every subsequent build.
-`infrastructure/set-tunnel-release-secret.sh` mints the separate AWS publish credentials
-(`tunnel_release_aws_key_id` / `tunnel_release_aws_secret`) but does not touch the signing key — that stays a
-manual, one-time step. All three release secrets must be scoped to **tag events only** in the Woodpecker UI, so
-the push-to-master deploy pipeline never has access to them.
-
-Planned key rotation (not a compromise): publish one transition release whose binary embeds the NEW public key
-but is still signed with the OLD key, so the fleet updates under old-key trust before CI switches secrets — no
-reinstall needed. A *compromised* key has no such path; recovery is customers re-running `install.sh`.
-
 ## Local dev / testing the release layout
 
-Build both arches with a throwaway version, sign them, lay out `latest-version` + `releases/<v>/…` under a temp
+Build both arches with a throwaway version, write their checksums, lay out `latest-version` + `releases/<v>/…` under a temp
 directory, and serve it with `python3 -m http.server`; point `AGENTPARLEY_TUNNEL_BINARY`/`AGENTPARLEY_TUNNEL_UPDATE_SERVER`
 at it to drive `install.sh` and `self-update` against a fake release site without touching the real bucket.
 
@@ -163,7 +144,7 @@ deny_commands: []        # patterns; deny always beats allow
 enabled: true            # false denies EVERY operation
 max_concurrent_operations: 8   # optional; how many operations this box runs at once (default 8 if unset)
 auto_update: true        # optional; false turns off the self-update ExecStartPre entirely (default true)
-update_server: https://tunnel-app.agentparley.ai   # optional; where self-update checks for new releases
+update_server: https://get.agentparley.ai   # optional; where self-update checks for new releases
 ```
 
 `policy` is checked before every single operation, on this box, regardless of what the platform's own account-level

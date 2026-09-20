@@ -1,4 +1,4 @@
-# Publishes a new agentparley-tunnel release to https://tunnel-app.agentparley.ai — triggered by a git tag,
+# Publishes a new agentparley-tunnel release to https://get.agentparley.ai — triggered by a git tag,
 # never by a push to main, so shipping a new binary to every customer's box on its next start is a deliberate
 # act rather than something that follows from a plain commit.
 #

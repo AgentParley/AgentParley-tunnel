@@ -72,7 +72,7 @@ type HarnessModelConfig struct {
 }
 
 // defaultUpdateServer is where install.sh points self-update when the customer didn't override it.
-const defaultUpdateServer = "https://tunnel-app.agentparley.ai"
+const defaultUpdateServer = "https://get.agentparley.ai"
 
 // Load reads and parses the config file at path. There is no built-in default for Enabled/RunAs — an operator-less
 // config is a misconfiguration, not a safe default, so a missing or malformed file is a hard error rather than a
