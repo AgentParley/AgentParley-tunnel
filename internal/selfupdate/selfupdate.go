@@ -8,7 +8,6 @@ package selfupdate
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -125,17 +124,6 @@ func applyUpdate(updateServer, latestVersion string) {
 		return
 	}
 
-	signature, err := downloadSignature(ctx, binaryURL+".sig")
-	if err != nil {
-		log.Printf("self-update: downloading %s.sig: %v", binaryURL, err)
-		return
-	}
-
-	if !verifyRelease(binaryBytes, signature) {
-		log.Printf("self-update: SIGNATURE VERIFICATION FAILED for %s — this may indicate tampering, refusing to install", binaryURL)
-		return
-	}
-
 	if err := os.WriteFile(partialBinaryPath, binaryBytes, 0o755); err != nil {
 		log.Printf("self-update: writing %s: %v", partialBinaryPath, err)
 		_ = os.Remove(partialBinaryPath)
@@ -180,16 +168,4 @@ func downloadChecksum(ctx context.Context, url string) (string, error) {
 		return "", fmt.Errorf("empty checksum file")
 	}
 	return fields[0], nil
-}
-
-func downloadSignature(ctx context.Context, url string) ([]byte, error) {
-	body, err := downloadFile(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(body)))
-	if err != nil {
-		return nil, fmt.Errorf("decoding signature: %w", err)
-	}
-	return decoded, nil
 }

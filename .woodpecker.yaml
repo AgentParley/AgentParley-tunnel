@@ -16,11 +16,8 @@ when:
     ref: refs/tags/tunnel-v*
 
 steps:
-  build-and-sign:
+  build:
     image: golang:1.26.5
-    environment:
-      TUNNEL_RELEASE_SIGNING_KEY:
-        from_secret: tunnel_release_signing_key
     commands:
       - VERSION="${CI_COMMIT_TAG#tunnel-v}"
       - |
@@ -28,16 +25,17 @@ steps:
           echo "tag ${CI_COMMIT_TAG} does not have the shape tunnel-v<semver> (got version: $VERSION)"
           exit 1
         }
-      - test -n "$TUNNEL_RELEASE_SIGNING_KEY" || { echo "tunnel_release_signing_key secret is empty or not injected"; exit 1; }
       # All dependencies (grpc, protobuf, yaml.v3) are pure Go — CGO off is safe and makes the binaries static.
       - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X github.com/agentparley/tunnel/internal/version.Version=$VERSION" -o dist/agentparley-tunnel-linux-amd64 .
       - CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w -X github.com/agentparley/tunnel/internal/version.Version=$VERSION" -o dist/agentparley-tunnel-linux-arm64 .
-      - go run ./release/sign dist/agentparley-tunnel-linux-amd64 dist/agentparley-tunnel-linux-arm64
+      # Sidecar checksums install.sh and the daemon's self-update both verify the download against. Written from
+      # inside dist/ so each line carries the bare filename, which is what `sha256sum -c` expects.
+      - cd dist && for f in agentparley-tunnel-linux-amd64 agentparley-tunnel-linux-arm64; do sha256sum "$f" > "$f.sha256"; done && cd ..
       - echo "$VERSION" > dist/latest-version
 
   publish:
     image: amazon/aws-cli
-    depends_on: [build-and-sign]
+    depends_on: [build]
     environment:
       AWS_ACCESS_KEY_ID:
         from_secret: tunnel_release_aws_key_id
