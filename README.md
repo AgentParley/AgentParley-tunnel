@@ -96,7 +96,7 @@ git tag tunnel-v1.4.2
 git push origin tunnel-v1.4.2
 ```
 
-This fires `.woodpecker.yaml`, which cross-compiles amd64 + arm64 with the version stamped in via
+This fires `.github/workflows/release.yaml`, which cross-compiles amd64 + arm64 with the version stamped in via
 `-ldflags -X .../internal/version.Version=1.4.2`, writes each binary's `.sha256` sidecar, and uploads to the
 bucket behind `get.agentparley.ai` —
 the versioned artifacts first, `latest-version` last, so a box can never observe a half-published release. Every
@@ -107,8 +107,8 @@ pipeline (that builds a NEW release, it doesn't undo one):
 
 ```bash
 echo "1.4.1" > /tmp/latest-version
-aws --profile personal --region us-east-1 s3 cp /tmp/latest-version \
-  s3://agentparley-tunnel-releases-970652200122/latest-version \
+aws --profile agentparley --region eu-central-1 s3 cp /tmp/latest-version \
+  s3://get.agentparley.ai/latest-version \
   --cache-control "public, max-age=300" --content-type "text/plain"
 ```
 
