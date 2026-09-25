@@ -55,8 +55,8 @@ A piped script has no arguments, so every override is an environment variable:
 | Variable | Default | Overrides |
 | --- | --- | --- |
 | `AGENTPARLEY_TUNNEL_USER` | `$SUDO_USER` | the OS account the daemon runs as |
-| `AGENTPARLEY_TUNNEL_API_SERVER` | `https://app.agentparley.ai` | the PlatformApi the daemon logs in / refreshes against |
-| `AGENTPARLEY_TUNNEL_EGRESS_SERVER` | `ssh-tunnel.agentparley.ai:443` | the SSH egress service the daemon connects out to |
+| `AGENTPARLEY_TUNNEL_API_SERVER` | `https://services.agentparley.ai/platform` | the Platform API the daemon logs in / refreshes against |
+| `AGENTPARLEY_TUNNEL_EGRESS_SERVER` | `services.agentparley.ai:443` | the SSH egress service the daemon connects out to |
 | `AGENTPARLEY_TUNNEL_UPDATE_SERVER` | `https://get.agentparley.ai` | where both install.sh and the daemon's self-update check for new releases; written into `config.yaml` as `update_server` only when overridden |
 | `AGENTPARLEY_TUNNEL_BINARY` | (unset) | path to a locally built binary — skips the download and checksum entirely, for a dev/checkout install |
 
@@ -135,8 +135,8 @@ deliberately doesn't have).
 
 ```yaml
 server:
-  api: https://app.agentparley.ai       # PlatformApi — login/enrol/refresh
-  egress: ssh-tunnel.agentparley.ai:443 # SSH egress service — the long-lived Connect stream
+  api: https://services.agentparley.ai/platform # Platform API — login/enrol/refresh
+  egress: services.agentparley.ai:443   # SSH egress service — the long-lived Connect stream
 run_as: deploy
 read_only: false        # true denies every write_file/delete_file
 allow_commands: []       # empty = every command allowed (subject to deny_commands below)

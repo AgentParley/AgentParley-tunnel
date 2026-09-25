@@ -22,8 +22,8 @@ STATE_DIR="/var/lib/agentparley-tunnel"
 UNIT_DIR="/etc/systemd/system"
 UNIT_NAME="agentparley-tunnel.service"
 
-DEFAULT_API_SERVER="https://app.agentparley.ai"
-DEFAULT_EGRESS_SERVER="ssh-tunnel.agentparley.ai:443"
+DEFAULT_API_SERVER="https://services.agentparley.ai/platform"
+DEFAULT_EGRESS_SERVER="services.agentparley.ai:443"
 DEFAULT_UPDATE_SERVER="https://get.agentparley.ai"   # where the binary + its checksum are fetched from
 INSTALL_SCRIPT_URL="https://get.agentparley.ai/tunnel/install.sh"   # where THIS script is served; published from this repo, which stays its source of truth
 
