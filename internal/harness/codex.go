@@ -104,7 +104,7 @@ func (h *codexHarness) Detect(ctx context.Context) error {
 			strings.TrimSpace(string(versionOutput)), codexMinMajor, codexMinMinor, codexMinPatch)
 	}
 
-	return runCapabilityProbe(ctx, resolvedPath, codexArgs(codexLegacyModelID), codexProbePrompt, h.path, parseCodexJSONLines)
+	return runCapabilityProbe(ctx, resolvedPath, codexArgs(codexLegacyModelID, ""), codexProbePrompt, h.path, parseCodexJSONLines)
 }
 
 // ListModels returns the config override wholesale when one is set (unchanged behavior). Otherwise it asks the
@@ -170,7 +170,7 @@ func (h *codexHarness) listAccountModels(ctx context.Context) ([]Model, error) {
 var codexModelSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 func (h *codexHarness) Invoke(ctx context.Context, model, payload string) (InvokeOutcome, error) {
-	prompt, _, outputSchema, err := parseClaudeCodexPayload(payload)
+	decoded, err := parseClaudeCodexPayload(payload)
 	if err != nil {
 		return InvokeOutcome{}, err
 	}
@@ -182,13 +182,13 @@ func (h *codexHarness) Invoke(ctx context.Context, model, payload string) (Invok
 		return InvokeOutcome{}, fmt.Errorf("model %q is not a valid codex model id", model)
 	}
 
-	args := codexArgs(model)
+	args := codexArgs(model, decoded.ReasoningEffort)
 	// output_schema forces codex's reply into the platform's tool-call envelope via OpenAI structured output — the
 	// reliable replacement for the fenced-JSON-in-prose convention, which a frontier model still fought under the
 	// non-agentic pin. The schema lives on the C# side (single source of truth); the daemon only materializes it to
 	// a file because --output-schema takes a path.
-	if outputSchema != "" {
-		schemaPath, cleanup, err := writeOutputSchemaFile(outputSchema)
+	if decoded.OutputSchema != "" {
+		schemaPath, cleanup, err := writeOutputSchemaFile(decoded.OutputSchema)
 		if err != nil {
 			return InvokeOutcome{}, err
 		}
@@ -196,7 +196,7 @@ func (h *codexHarness) Invoke(ctx context.Context, model, payload string) (Invok
 		args = append(args, "--output-schema", schemaPath)
 	}
 
-	return runCLI(ctx, h.command, args, prompt, h.path)
+	return runCLI(ctx, h.command, args, decoded.Prompt, h.path)
 }
 
 func writeOutputSchemaFile(schema string) (path string, cleanup func(), err error) {
@@ -223,8 +223,10 @@ func writeOutputSchemaFile(schema string) (path string, cleanup func(), err erro
 // empties the box's locally configured MCP server table regardless of what the box's own config says. Never add
 // --dangerously-bypass-approvals-and-sandbox: it disables the read-only sandbox AND is codex's only documented way
 // to auto-approve MCP tool calls non-interactively (`codex exec` closes stdin, so the approval prompt reads EOF
-// and auto-declines otherwise) — passing it would silently undo this entire pin.
-func codexArgs(model string) []string {
+// and auto-declines otherwise) — passing it would silently undo this entire pin. reasoningEffort, when non-empty,
+// sets both the effort and "detailed" summaries (verified on codex-cli 0.153.4) — the summaries are what let
+// item.completed "reasoning" events carry readable text back to the platform instead of just a signature.
+func codexArgs(model, reasoningEffort string) []string {
 	args := []string{
 		"exec", "--json",
 		"--skip-git-repo-check",
@@ -233,6 +235,9 @@ func codexArgs(model string) []string {
 	}
 	if model != codexLegacyModelID {
 		args = append(args, "-m", model)
+	}
+	if reasoningEffort != "" {
+		args = append(args, "-c", "model_reasoning_effort="+reasoningEffort, "-c", "model_reasoning_summary=detailed")
 	}
 	return args
 }

@@ -91,7 +91,7 @@ func (h *claudeHarness) Detect(ctx context.Context) error {
 			strings.TrimSpace(string(versionOutput)), claudeMinMajor, claudeMinMinor, claudeMinPatch)
 	}
 
-	return runCapabilityProbe(ctx, resolvedPath, claudeArgs(claudeDefaultModels[0].ID, ""), claudeProbePrompt, h.path, parseClaudeJSON)
+	return runCapabilityProbe(ctx, resolvedPath, claudeArgs(claudeDefaultModels[0].ID, "", ""), claudeProbePrompt, h.path, parseClaudeJSON)
 }
 
 func (h *claudeHarness) ListModels(ctx context.Context) ([]Model, error) {
@@ -99,12 +99,12 @@ func (h *claudeHarness) ListModels(ctx context.Context) ([]Model, error) {
 }
 
 func (h *claudeHarness) Invoke(ctx context.Context, model, payload string) (InvokeOutcome, error) {
-	prompt, systemPrompt, _, err := parseClaudeCodexPayload(payload)
+	decoded, err := parseClaudeCodexPayload(payload)
 	if err != nil {
 		return InvokeOutcome{}, err
 	}
 
-	return runCLI(ctx, h.command, claudeArgs(model, systemPrompt), prompt, h.path)
+	return runCLI(ctx, h.command, claudeArgs(model, decoded.SystemPrompt, decoded.ReasoningEffort), decoded.Prompt, h.path)
 }
 
 // claudeArgs is the FIXED, daemon-owned argv for every claude invocation (Detect's probe and Invoke alike) —
@@ -118,7 +118,7 @@ func (h *claudeHarness) Invoke(ctx context.Context, model, payload string) (Invo
 // and a user with an API key needs no tunnel at all. Those docs also say --bare will become the -p default in a
 // future release, at which point Detect's probe starts failing "not signed in"; that is the fail-closed signal to
 // pin the old behaviour explicitly, not to adopt --bare.
-func claudeArgs(model, systemPrompt string) []string {
+func claudeArgs(model, systemPrompt, reasoningEffort string) []string {
 	args := []string{
 		"-p", "--output-format", "json",
 		"--model", model,
@@ -128,6 +128,9 @@ func claudeArgs(model, systemPrompt string) []string {
 	}
 	if systemPrompt != "" {
 		args = append(args, "--append-system-prompt", systemPrompt)
+	}
+	if reasoningEffort != "" {
+		args = append(args, "--effort", reasoningEffort)
 	}
 	return args
 }

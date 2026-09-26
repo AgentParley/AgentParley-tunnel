@@ -27,24 +27,35 @@ const maxCLIErrorOutputBytes = 64 * 1024
 const capabilityProbeTimeout = 30 * time.Second
 
 // cliPayload is the wire shape both CLI harnesses accept: {"prompt": "...", "systemPrompt": "..." | omitted,
-// "output_schema": "..." | omitted}. Codex never sets systemPrompt — its system content is folded into prompt by
-// the C# side. output_schema is codex-only: a JSON Schema string the C# side supplies so codex's reply is forced
-// (via `--output-schema`, i.e. OpenAI structured output) into the platform's tool-call envelope; claude ignores it.
+// "output_schema": "..." | omitted, "reasoning_effort": "" | "low" | "medium" | "high"}. Codex never sets
+// systemPrompt — its system content is folded into prompt by the C# side. output_schema is codex-only: a JSON
+// Schema string the C# side supplies so codex's reply is forced (via `--output-schema`, i.e. OpenAI structured
+// output) into the platform's tool-call envelope; claude ignores it. reasoning_effort is omitted (empty string)
+// when the agent's thinking level is Off — both harnesses then run at the CLI's own default.
 type cliPayload struct {
-	Prompt       string `json:"prompt"`
-	SystemPrompt string `json:"systemPrompt"`
-	OutputSchema string `json:"output_schema"`
+	Prompt          string `json:"prompt"`
+	SystemPrompt    string `json:"systemPrompt"`
+	OutputSchema    string `json:"output_schema"`
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
-func parseClaudeCodexPayload(payload string) (prompt, systemPrompt, outputSchema string, err error) {
+// validReasoningEfforts is the closed set the C# side ever sends — checked here because reasoning_effort is
+// placed directly into argv (claude's --effort, codex's -c model_reasoning_effort=) and an unvalidated value would
+// otherwise reach the subprocess as an arbitrary string.
+var validReasoningEfforts = map[string]bool{"": true, "low": true, "medium": true, "high": true}
+
+func parseClaudeCodexPayload(payload string) (cliPayload, error) {
 	var decoded cliPayload
 	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
-		return "", "", "", fmt.Errorf("invoke payload is not valid JSON: %w", err)
+		return cliPayload{}, fmt.Errorf("invoke payload is not valid JSON: %w", err)
 	}
 	if decoded.Prompt == "" {
-		return "", "", "", errors.New("invoke payload is missing a non-empty \"prompt\"")
+		return cliPayload{}, errors.New("invoke payload is missing a non-empty \"prompt\"")
 	}
-	return decoded.Prompt, decoded.SystemPrompt, decoded.OutputSchema, nil
+	if !validReasoningEfforts[decoded.ReasoningEffort] {
+		return cliPayload{}, fmt.Errorf("invoke payload has an invalid reasoning_effort %q", decoded.ReasoningEffort)
+	}
+	return decoded, nil
 }
 
 // resolveCLIModels applies the CLI family's "replaced wholesale" config rule: an empty overrides list means the
