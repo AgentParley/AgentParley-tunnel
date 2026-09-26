@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/agentparley/tunnel/internal/config"
@@ -48,26 +49,35 @@ var claudeBuiltInTools = []string{
 
 type claudeHarness struct {
 	command      string
+	path         string
 	modelConfigs []config.HarnessModelConfig
 }
 
-func newClaudeHarness(harnessConfig config.HarnessConfig) *claudeHarness {
+func newClaudeHarness(harnessConfig config.HarnessConfig, discovered discoveredHarness) *claudeHarness {
 	command := harnessConfig.Command
+	if command == "" {
+		command = discovered.Command
+	}
 	if command == "" {
 		command = "claude"
 	}
-	return &claudeHarness{command: command, modelConfigs: harnessConfig.Models}
+	return &claudeHarness{command: command, path: discovered.Path, modelConfigs: harnessConfig.Models}
 }
 
 func (h *claudeHarness) Detect(ctx context.Context) error {
 	resolvedPath, err := exec.LookPath(h.command)
 	if err != nil {
+		if filepath.IsAbs(h.command) {
+			return fmt.Errorf("%q no longer exists — it may have been moved or uninstalled; re-run 'agentparley-tunnel register' to rediscover claude: %w", h.command, err)
+		}
 		return fmt.Errorf("claude CLI (%q) not found on PATH: %w", h.command, err)
 	}
 
 	versionCtx, cancel := context.WithTimeout(ctx, capabilityProbeTimeout)
 	defer cancel()
-	versionOutput, err := exec.CommandContext(versionCtx, resolvedPath, "--version").Output()
+	versionCmd := exec.CommandContext(versionCtx, resolvedPath, "--version")
+	versionCmd.Env = envWithPath(h.path)
+	versionOutput, err := versionCmd.Output()
 	if err != nil {
 		return fmt.Errorf("running %q --version: %w", h.command, err)
 	}
@@ -81,7 +91,7 @@ func (h *claudeHarness) Detect(ctx context.Context) error {
 			strings.TrimSpace(string(versionOutput)), claudeMinMajor, claudeMinMinor, claudeMinPatch)
 	}
 
-	return runCapabilityProbe(ctx, resolvedPath, claudeArgs(claudeDefaultModels[0].ID, ""), claudeProbePrompt, parseClaudeJSON)
+	return runCapabilityProbe(ctx, resolvedPath, claudeArgs(claudeDefaultModels[0].ID, ""), claudeProbePrompt, h.path, parseClaudeJSON)
 }
 
 func (h *claudeHarness) ListModels(ctx context.Context) ([]Model, error) {
@@ -94,7 +104,7 @@ func (h *claudeHarness) Invoke(ctx context.Context, model, payload string) (Invo
 		return InvokeOutcome{}, err
 	}
 
-	return runCLI(ctx, h.command, claudeArgs(model, systemPrompt), prompt)
+	return runCLI(ctx, h.command, claudeArgs(model, systemPrompt), prompt, h.path)
 }
 
 // claudeArgs is the FIXED, daemon-owned argv for every claude invocation (Detect's probe and Invoke alike) —

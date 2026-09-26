@@ -34,6 +34,10 @@ this daemon  --outbound gRPC-->  SSH egress service  <--Runtime posts commands h
 - **`logout`** — revokes this install server-side (`POST /tunnel/revoke`, authenticated the same way as a token
   refresh) and then deletes the local credentials and key. The local wipe always happens, even if the box cannot
   reach the PlatformApi — a box that can't reach us must still be able to disarm itself.
+- **`register`** — finds and registers this box's own local model harnesses (codex, claude, ollama, an
+  OpenAI-compatible server) so AgentParley can route completions to them. See "Registering local model harnesses"
+  below.
+- **`unregister <harness>`** — removes this box's provider for one harness (`register`'s counterpart).
 
 ## Install
 
@@ -145,6 +149,24 @@ enabled: true            # false denies EVERY operation
 max_concurrent_operations: 8   # optional; how many operations this box runs at once (default 8 if unset)
 auto_update: true        # optional; false turns off the self-update ExecStartPre entirely (default true)
 update_server: https://get.agentparley.ai   # optional; where self-update checks for new releases
+
+# Local model harnesses (see "Registering local model harnesses" below). Every key here is optional — `register`
+# auto-discovers what it can; set these only to override or to supply what discovery can't determine on its own.
+allow_harnesses: []   # empty = all four harnesses considered (subject to detection succeeding on the box)
+deny_harnesses: []    # e.g. ["codex"] to keep the codex harness off even if installed — deny always beats allow
+harnesses:
+  codex:
+    command: /home/deploy/.npm-global/bin/codex   # optional override; `register` finds this itself otherwise
+  claude:
+    command: claude                # optional override; defaults to "claude", auto-discovered by `register`
+  ollama:
+    url: http://localhost:11434    # this is the built-in default; only needed to override
+  openai-compatible-local:
+    url: http://localhost:8000     # optional; `register` also tries LM Studio/vLLM/llama.cpp's well-known ports
+    models:
+      - id: my-local-model
+        label: My local model
+        context_window_tokens: 32768   # required whenever the server doesn't expose its context window
 ```
 
 `policy` is checked before every single operation, on this box, regardless of what the platform's own account-level
@@ -152,7 +174,40 @@ allowlists already decided — it is the box owner's own lever, independent of A
 `deny_commands` are matched against the RAW command text the agent asked for, never against the wrapped shell
 invocation the daemon actually executes. Each pattern is matched against the FULL command line, where `*` matches
 any run of characters (including `/` — a command line has no path-segment structure, so `rm -rf /*` matches
-`rm -rf /etc`); everything else in the pattern must match literally.
+`rm -rf /etc`); everything else in the pattern must match literally. `allow_harnesses`/`deny_harnesses` use the same
+glob matching, against the harness name (`codex`, `claude`, `ollama`, `openai-compatible-local`).
+
+## Registering local model harnesses
+
+`agentparley-tunnel register` (no argument) is how you expose this box's own local models — a signed-in codex or
+claude CLI, a running Ollama, or an OpenAI-compatible server (LM Studio, vLLM, llama.cpp) — to AgentParley as
+Providers your agents can pick. Run it once as the box's `run_as` user (`sudo -u <run_as> agentparley-tunnel
+register`, or plain `agentparley-tunnel register` if you're already that user) any time you install or update a
+local harness; it is safe to re-run.
+
+It scans all four harnesses in order and prints one line per harness:
+
+```
+✓ codex                    registered — Codex (ChatGPT account default)
+✓ ollama                   registered — 3 models
+✗ claude                   installed but not ready: claude CLI version "2.0.9" is older than the minimum 2.1.207 ...
+– openai-compatible-local  not found
+```
+
+`✓` registered, `✗` found but not ready (a real problem — an old CLI version, a signed-out account, a server
+returning malformed models), `–` not found or excluded by `allow_harnesses`/`deny_harnesses` on this box — the
+ordinary case for whichever of the four you don't run. The command exits non-zero only when NOTHING registered and
+at least one harness genuinely failed; a box with no local model providers at all exits 0.
+
+`register <harness>` does the same for just that one harness. `unregister <harness>` removes it again.
+
+**Why config.yaml is usually unnecessary:** a codex/claude CLI installed under your own login shell (nvm,
+`~/.npm-global`, homebrew) is invisible to `sudo -u <run_as> agentparley-tunnel register` and to the systemd
+service itself — both run with a stripped-down PATH that never sees where an interactive terminal finds it.
+`register` works around this by asking the `run_as` user's own login shell where the binary lives (and what PATH it
+needs, e.g. for a `codex`/`claude` installed as a `#!/usr/bin/env node` script) and remembers the answer — no
+config.yaml edit, no daemon restart. An explicit `harnesses.<name>.command`/`.url` in config.yaml always overrides
+whatever `register` found.
 
 ## State this daemon owns on disk
 
@@ -160,6 +215,7 @@ any run of characters (including `/` — a command line has no path-segment stru
 | --- | --- | --- |
 | `/etc/agentparley-tunnel/config.yaml` | policy config | 0644 |
 | `/var/lib/agentparley-tunnel/credentials.json` | refresh token + Ed25519 key — durable identity, survives a reboot on purpose | 0600, in a 0700 dir |
+| `/var/lib/agentparley-tunnel/harnesses.json` | what `register` auto-discovered per harness (a CLI's absolute path + PATH, or a local server's URL) — merged in under config.yaml, never overriding an explicit value there | 0600, in a 0700 dir |
 
 Everything below is deliberately **NOT** on persistent disk — a captured session environment can contain secrets
 (an `AWS_SECRET_ACCESS_KEY`, a database password), so both the ledger and the shell state it describes live under a

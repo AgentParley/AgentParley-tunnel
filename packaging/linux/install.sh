@@ -237,6 +237,7 @@ enable_service_and_report() {
 	echo "Installed agentparley-tunnel ($INSTALLED_VERSION). Next steps:"
 	echo "  1. sudo -u $RUN_AS_USER $INSTALL_BIN_DIR/$BINARY_NAME login"
 	echo "  2. sudo systemctl start $UNIT_NAME"
+	echo "  3. sudo -u $RUN_AS_USER $INSTALL_BIN_DIR/$BINARY_NAME register   # optional: discover and register any local model harnesses (codex, claude, ollama, ...)"
 
 	if [ "$WAS_ACTIVE" = "true" ]; then
 		echo ""

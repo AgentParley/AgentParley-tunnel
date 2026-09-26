@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -68,11 +69,40 @@ func resolveCLIModels(defaults []Model, overrides []config.HarnessModelConfig, h
 	return models, nil
 }
 
+// envWithPath returns the current process's environment with PATH replaced by path — used whenever a CLI
+// harness's command was resolved through a discovered PATH (e.g. an nvm-installed codex, whose
+// `#!/usr/bin/env node` launcher needs node on PATH at exec time, not just at the moment `register` resolved the
+// command itself). An empty path means no discovery applies here, so the subprocess inherits this process's
+// environment unmodified (nil Env == inherit, per os/exec).
+func envWithPath(path string) []string {
+	if path == "" {
+		return nil
+	}
+	env := os.Environ()
+	filtered := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, "PATH=") {
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(filtered, "PATH="+path)
+}
+
 // runCLI execs command with args, feeding prompt on stdin from a per-invoke temp working directory — the CLI is
 // used strictly as a model endpoint, so it gets a throwaway directory rather than the daemon's own working
 // directory or the run_as user's home. ctx carries the operation deadline: cancelling it kills the process, so a
-// timed-out invoke does not keep running on the box after the caller has given up.
-func runCLI(ctx context.Context, command string, args []string, prompt string) (InvokeOutcome, error) {
+// timed-out invoke does not keep running on the box after the caller has given up. envPath is the PATH register
+// discovered for this harness, if any (see envWithPath).
+func runCLI(ctx context.Context, command string, args []string, prompt string, envPath string) (InvokeOutcome, error) {
+	// command is commonly an absolute path register resolved and persisted (see discovery.go) — if the box has
+	// since moved or uninstalled it, os/exec's own "file not found" is accurate but doesn't say what to DO about
+	// it, so this checks first and gives the fix.
+	if filepath.IsAbs(command) {
+		if _, statErr := os.Stat(command); statErr != nil {
+			return InvokeOutcome{}, fmt.Errorf("%q no longer exists (moved or uninstalled?) — re-run 'agentparley-tunnel register' to rediscover it: %w", command, statErr)
+		}
+	}
+
 	workingDir, err := os.MkdirTemp("", "agentparley-tunnel-harness-*")
 	if err != nil {
 		return InvokeOutcome{}, fmt.Errorf("creating a working directory for %s: %w", command, err)
@@ -81,6 +111,7 @@ func runCLI(ctx context.Context, command string, args []string, prompt string) (
 
 	subprocess := exec.CommandContext(ctx, command, args...)
 	subprocess.Dir = workingDir
+	subprocess.Env = envWithPath(envPath)
 	subprocess.Stdin = bytes.NewBufferString(prompt)
 	subprocess.Cancel = func() error { return subprocess.Process.Signal(syscall.SIGKILL) }
 
@@ -124,11 +155,11 @@ func truncate(value string, maxBytes int) string {
 // above some version number. It is capped at capabilityProbeTimeout so a hung CLI fails closed instead of
 // blocking `register` indefinitely. Callers have already resolved command via exec.LookPath as part of their own
 // version check, so this does not repeat that lookup.
-func runCapabilityProbe(ctx context.Context, command string, args []string, prompt string, parseOutput func(stdout string) error) error {
+func runCapabilityProbe(ctx context.Context, command string, args []string, prompt string, envPath string, parseOutput func(stdout string) error) error {
 	probeCtx, cancel := context.WithTimeout(ctx, capabilityProbeTimeout)
 	defer cancel()
 
-	outcome, err := runCLI(probeCtx, command, args, prompt)
+	outcome, err := runCLI(probeCtx, command, args, prompt, envPath)
 	if err != nil {
 		if probeCtx.Err() != nil {
 			return fmt.Errorf("probing %q timed out after %s — cannot prove it is installed, accepts the pinned flags, and is signed in", command, capabilityProbeTimeout)

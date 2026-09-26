@@ -2,8 +2,11 @@
 // harnesses this box can expose: two agentic CLIs pinned into non-agentic, tool-free model endpoints (codex,
 // claude), and two OpenAI-compatible HTTP servers (ollama, openai-compatible-local). Nothing here ever accepts a
 // URL, binary path, flag, or argv fragment from the wire — every Harness resolves what to call solely from this
-// box's own local config (or its own built-in defaults), which is the whole point of the tunnel design: a
-// compromised platform can name a harness and a model, never how that harness is invoked.
+// box's own local config, its own built-in defaults, or what `register` already found and persisted on THIS box
+// (see discovery.go) — which is the whole point of the tunnel design: a compromised platform can name a harness
+// and a model, never how that harness is invoked. A model id IS wire-supplied (InvokeHarnessCall.model), so every
+// Invoke that turns it into a flag VALUE (codex's -m) first requires a plain model-slug shape — never an arbitrary
+// wire string reaching a subprocess argv unchecked.
 package harness
 
 import (
@@ -58,24 +61,43 @@ type Harness interface {
 }
 
 // Resolve returns the Harness implementation for harnessName, or an error naming why it can't run on this box — an
-// unknown name, or missing REQUIRED config (openai-compatible-local's url has no built-in default).
+// unknown name, or missing REQUIRED config (openai-compatible-local's url has no built-in default). It is called
+// per invoke (dispatch.go) as well as by `register`, so it re-reads the discovery file on every call — a small
+// local file read, cheap enough to skip caching — merging whatever `register` found in under whatever config.yaml
+// already says (config always wins; see withDiscoveredURL and the CLI constructors).
 func Resolve(harnessName string, tunnelConfig *config.Config) (Harness, error) {
 	harnessConfig := tunnelConfig.Harnesses[harnessName]
+	discoveries, err := loadDiscoveries()
+	if err != nil {
+		return nil, fmt.Errorf("reading discovered harnesses: %w", err)
+	}
+	discovered := discoveries[harnessName]
+
 	switch harnessName {
 	case Codex:
-		return newCodexHarness(harnessConfig), nil
+		return newCodexHarness(harnessConfig, discovered), nil
 	case Claude:
-		return newClaudeHarness(harnessConfig), nil
+		return newClaudeHarness(harnessConfig, discovered), nil
 	case Ollama:
-		return newOllamaHarness(harnessConfig), nil
+		return newOllamaHarness(withDiscoveredURL(harnessConfig, discovered)), nil
 	case OpenAICompatibleLocal:
-		if harnessConfig.URL == "" {
-			return nil, fmt.Errorf("harness %q requires harnesses.%s.url in config — there is no built-in default for a bespoke OpenAI-compatible server", harnessName, harnessName)
+		merged := withDiscoveredURL(harnessConfig, discovered)
+		if merged.URL == "" {
+			return nil, fmt.Errorf("harness %q requires harnesses.%s.url in config, or run `agentparley-tunnel register` to auto-discover a local server — there is no built-in default for a bespoke OpenAI-compatible server", harnessName, harnessName)
 		}
-		return newOpenAICompatibleLocalHarness(harnessConfig), nil
+		return newOpenAICompatibleLocalHarness(merged), nil
 	default:
 		return nil, fmt.Errorf("unknown harness %q — valid harnesses are %s, %s, %s, %s", harnessName, Codex, Claude, Ollama, OpenAICompatibleLocal)
 	}
+}
+
+// withDiscoveredURL fills harnessConfig.URL from discovered only when config left it empty — explicit config
+// always wins over anything `register` found on its own.
+func withDiscoveredURL(harnessConfig config.HarnessConfig, discovered discoveredHarness) config.HarnessConfig {
+	if harnessConfig.URL == "" {
+		harnessConfig.URL = discovered.URL
+	}
+	return harnessConfig
 }
 
 // findModelOverride looks up a config override for modelID within a harness's Models list, or reports found=false.

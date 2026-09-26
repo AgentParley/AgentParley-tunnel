@@ -6,7 +6,11 @@
 //	agentparley-tunnel start        — runs the connect loop in the foreground (systemd's ExecStart)
 //	agentparley-tunnel status       — prints whether credentials exist and what the config says
 //	agentparley-tunnel logout       — deregisters and wipes local state
-//	agentparley-tunnel register     — detects a local model harness and registers its models with the platform
+//	agentparley-tunnel register     — with no argument, scans and registers every available harness (codex,
+//	                                  claude, ollama, openai-compatible-local); register <harness> does just that
+//	                                  one. Either way, discovery (finding a CLI installed outside this process's
+//	                                  own PATH, or a local OpenAI-compatible server on a well-known port) runs
+//	                                  first — see internal/harness/discovery.go
 //	agentparley-tunnel unregister   — removes this box's provider for one harness
 //	agentparley-tunnel self-update  — checks for and installs a newer (or rolled-back) release (systemd's
 //	                                  ExecStartPre, runs as root just before every start)
@@ -28,6 +32,7 @@ import (
 	"github.com/agentparley/tunnel/internal/credstore"
 	"github.com/agentparley/tunnel/internal/harness"
 	"github.com/agentparley/tunnel/internal/login"
+	"github.com/agentparley/tunnel/internal/policy"
 	"github.com/agentparley/tunnel/internal/selfupdate"
 	"github.com/agentparley/tunnel/internal/shellrun"
 	"github.com/agentparley/tunnel/internal/version"
@@ -72,7 +77,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: agentparley-tunnel <login|start|status|logout|register|unregister|self-update|ws> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: agentparley-tunnel <login|start|status|logout|register [harness]|unregister <harness>|self-update|ws> [flags]")
 }
 
 func runLogin(args []string) error {
@@ -207,14 +212,32 @@ func runRegister(args []string) error {
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
-	if flagSet.NArg() != 1 {
-		return fmt.Errorf("usage: agentparley-tunnel register <harness>")
+	if flagSet.NArg() > 1 {
+		return fmt.Errorf("usage: agentparley-tunnel register [harness]")
 	}
-	harnessName := flagSet.Arg(0)
 
-	tunnelConfig, credentials, err := loadConfigAndCredentials(*configPath)
+	tunnelConfig, credentials, runAsUser, err := loadConfigAndCredentials(*configPath)
 	if err != nil {
 		return err
+	}
+
+	if flagSet.NArg() == 0 {
+		return runRegisterScan(tunnelConfig, credentials, runAsUser)
+	}
+	harnessName := flagSet.Arg(0)
+	if ok, reason := policy.New(tunnelConfig).HarnessDiscoverable(harnessName); !ok {
+		return fmt.Errorf("%s: %s in config.yaml", harnessName, reason)
+	}
+
+	found, hint, err := harness.Discover(harnessName, tunnelConfig, runAsUser)
+	if err != nil {
+		return fmt.Errorf("discovering %s: %w", harnessName, err)
+	}
+	if !found {
+		if hint == "" {
+			hint = "not found on this box"
+		}
+		return fmt.Errorf("%s: %s", harnessName, hint)
 	}
 
 	resolvedHarness, err := harness.Resolve(harnessName, tunnelConfig)
@@ -241,6 +264,96 @@ func runRegister(args []string) error {
 	return nil
 }
 
+// scanHarnessNames is the fixed order `register` (no argument) walks every run — matches the order they're listed
+// throughout the README and config.yaml.
+var scanHarnessNames = []string{harness.Codex, harness.Claude, harness.Ollama, harness.OpenAICompatibleLocal}
+
+// runRegisterScan is `register` with no argument: discover → resolve → Detect → ListModels → RegisterHarness for
+// every harness the policy's allow/deny lists don't exclude, printing one line per harness so an operator can see
+// at a glance what this box actually offers without hand-editing config.yaml. It returns a non-zero-exit error only
+// when NOTHING registered and at least one harness genuinely failed (as opposed to simply not being installed) —
+// a box with no local model providers at all is a normal, exit-0 outcome, not a failure.
+func runRegisterScan(tunnelConfig *config.Config, credentials *credstore.Credentials, runAsUser *shellrun.User) error {
+	harnessPolicy := policy.New(tunnelConfig)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	ctx := context.Background()
+
+	registeredCount, failedCount := 0, 0
+	for _, harnessName := range scanHarnessNames {
+		if ok, reason := harnessPolicy.HarnessDiscoverable(harnessName); !ok {
+			fmt.Printf("– %-24s %s\n", harnessName, reason)
+			continue
+		}
+
+		found, hint, err := harness.Discover(harnessName, tunnelConfig, runAsUser)
+		if err != nil {
+			failedCount++
+			fmt.Printf("✗ %-24s %v\n", harnessName, err)
+			continue
+		}
+		if !found {
+			if hint == "" {
+				hint = "not found"
+			}
+			fmt.Printf("– %-24s %s\n", harnessName, hint)
+			continue
+		}
+
+		resolvedHarness, err := harness.Resolve(harnessName, tunnelConfig)
+		if err != nil {
+			failedCount++
+			fmt.Printf("✗ %-24s %v\n", harnessName, err)
+			continue
+		}
+		if err := resolvedHarness.Detect(ctx); err != nil {
+			// ollama carries a built-in default url rather than a discovery step of its own — Detect's own
+			// reachability check IS its presence signal, so a miss here reads as "not found" (the ordinary case
+			// for a box with no ollama running), keeping a vanilla box in the "nothing found" exit-0 bucket below
+			// rather than "installed but not ready".
+			if harnessName == harness.Ollama {
+				fmt.Printf("– %-24s not found: %v\n", harnessName, err)
+				continue
+			}
+			failedCount++
+			fmt.Printf("✗ %-24s installed but not ready: %v\n", harnessName, err)
+			continue
+		}
+
+		models, err := resolvedHarness.ListModels(ctx)
+		if err != nil {
+			failedCount++
+			fmt.Printf("✗ %-24s %v\n", harnessName, err)
+			continue
+		}
+
+		if _, err := client.RegisterHarness(httpClient, tunnelConfig.Server.APIBaseURL, credentials, harnessName, models); err != nil {
+			failedCount++
+			fmt.Printf("✗ %-24s registering: %v\n", harnessName, err)
+			continue
+		}
+
+		registeredCount++
+		fmt.Printf("✓ %-24s registered — %s\n", harnessName, registeredSummary(models))
+	}
+
+	if registeredCount == 0 {
+		if failedCount > 0 {
+			return fmt.Errorf("%d harness(es) failed and none registered", failedCount)
+		}
+		fmt.Println("no local model providers were found on this box")
+	}
+	return nil
+}
+
+// registeredSummary is the scan's "registered — …" tail: a single model's own label (codex's one ChatGPT-account
+// entry), or a plain count once there's more than one (ollama's pulled models, claude's opus/sonnet/haiku).
+func registeredSummary(models []harness.Model) string {
+	if len(models) == 1 {
+		return models[0].Label
+	}
+	return fmt.Sprintf("%d models", len(models))
+}
+
 func runUnregister(args []string) error {
 	flagSet := flag.NewFlagSet("unregister", flag.ExitOnError)
 	configPath := flagSet.String("config", config.DefaultPath, "path to config.yaml")
@@ -252,7 +365,7 @@ func runUnregister(args []string) error {
 	}
 	harnessName := flagSet.Arg(0)
 
-	tunnelConfig, credentials, err := loadConfigAndCredentials(*configPath)
+	tunnelConfig, credentials, _, err := loadConfigAndCredentials(*configPath)
 	if err != nil {
 		return err
 	}
@@ -270,30 +383,31 @@ func runUnregister(args []string) error {
 // files, exactly like runStart does before it ever starts serving operations — skipping this would let
 // `sudo agentparley-tunnel register claude` probe root's ~/.claude and register successfully, while every turn at
 // invoke time, run as the daemon's real run_as user, fails with an unexplainable "is_error: true"), then load the
-// stored credentials. unregister shares the run_as check for symmetry even though it never touches the harness.
-func loadConfigAndCredentials(configPath string) (*config.Config, *credstore.Credentials, error) {
+// stored credentials. unregister shares the run_as check for symmetry even though it never touches the harness. The
+// returned runAsUser is what register's own discovery (internal/harness.Discover) asks a login shell on behalf of.
+func loadConfigAndCredentials(configPath string) (*config.Config, *credstore.Credentials, *shellrun.User, error) {
 	tunnelConfig, err := config.Load(configPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	runAsUser, err := shellrun.ResolveUser(tunnelConfig.RunAs)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := shellrun.VerifyMatchesProcess(runAsUser); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	credentials, err := credstore.New().Load()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if credentials == nil {
-		return nil, nil, fmt.Errorf("not logged in — run 'agentparley-tunnel login' first")
+		return nil, nil, nil, fmt.Errorf("not logged in — run 'agentparley-tunnel login' first")
 	}
 
-	return tunnelConfig, credentials, nil
+	return tunnelConfig, credentials, runAsUser, nil
 }
 
 // runSelfUpdate is systemd's ExecStartPre step, run as root just before every daemon start. A broken config must

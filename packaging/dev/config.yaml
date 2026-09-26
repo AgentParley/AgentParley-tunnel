@@ -11,23 +11,28 @@ allow_commands: []   # matched against the RAW command text; "*" crosses "/" —
 deny_commands: []
 enabled: true
 
-# Local model harnesses (`agentparley-tunnel register <harness>` / `unregister <harness>`). Uncomment and adjust to
-# expose local models to AgentParley through this tunnel — see the tunnel design doc's non-agentic pin for why the
-# CLI harnesses never take arbitrary flags from config.
+# Local model harnesses: THE way to expose them is `agentparley-tunnel register` (no argument) — it scans codex,
+# claude, ollama, and openai-compatible-local, auto-discovering a CLI installed under your login shell (nvm,
+# ~/.npm-global) or a local server on a well-known port, and persists what it finds to
+# /var/lib/agentparley-tunnel/harnesses.json — no config.yaml edit, no restart. `register <harness>` /
+# `unregister <harness>` work on just one. Everything below is OPTIONAL — set only to override what `register`
+# would find on its own, or to supply what it can't (a bespoke server's URL, a model's context window). See the
+# tunnel design doc's non-agentic pin for why the CLI harnesses never take arbitrary flags from config.
 # harnesses:
 #   codex:
-#     command: codex                # defaults to "codex", resolved via PATH
+#     command: codex                # overrides discovery; defaults to letting `register` find it
 #   claude:
-#     command: claude                # defaults to "claude", resolved via PATH
+#     command: claude                # overrides discovery; defaults to letting `register` find it
 #   ollama:
 #     url: http://localhost:11434    # this is the default; only needed to override
 #   openai-compatible-local:
-#     url: http://localhost:8000    # REQUIRED — vLLM/llama.cpp/LM Studio expose no fixed default. Give the
-#                                   # SERVER root, not the /v1 base an OpenAI client takes; a trailing /v1 is
-#                                   # trimmed for you since that is what everyone pastes.
+#     url: http://localhost:8000    # overrides discovery — `register` also tries LM Studio (:1234), vLLM
+#                                   # (:8000), and llama.cpp (:8080) on its own. Give the SERVER root, not the
+#                                   # /v1 base an OpenAI client takes; a trailing /v1 is trimmed for you since
+#                                   # that is what everyone pastes.
 #     models:
 #       - id: my-local-model
 #         label: My local model
 #         context_window_tokens: 32768   # required whenever the server doesn't expose max_model_len
-# allow_harnesses: []   # empty = all four harnesses allowed (subject to detection succeeding on the box)
+# allow_harnesses: []   # empty = all four harnesses considered (subject to detection succeeding on the box)
 # deny_harnesses: []    # e.g. ["codex"] to keep the codex harness off even if installed

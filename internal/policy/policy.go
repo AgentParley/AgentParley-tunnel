@@ -76,6 +76,20 @@ func (policy *Policy) CheckHarness(harness string) error {
 	return nil
 }
 
+// HarnessDiscoverable reports whether harnessName is even worth `register` attempting — the same allow/deny
+// harness-list matching CheckHarness applies before every invoke, checked here independently of Enabled (a
+// disabled box can still be registered ahead of being switched on). ok=false names which list excluded it, for
+// register's own skip line.
+func (policy *Policy) HarnessDiscoverable(harnessName string) (ok bool, reason string) {
+	if matchesAny(policy.tunnelConfig.DenyHarnesses, harnessName) {
+		return false, "denied by deny_harnesses"
+	}
+	if len(policy.tunnelConfig.AllowHarnesses) > 0 && !matchesAny(policy.tunnelConfig.AllowHarnesses, harnessName) {
+		return false, "denied by allow_harnesses"
+	}
+	return true, ""
+}
+
 // matchesAny reports whether command matches any of patterns. A pattern is a glob over the FULL command string
 // where "*" matches any run of characters, INCLUDING "/" — a command line has no path-segment structure to
 // respect the way a filesystem path does, so `path.Match`'s segment-bounded "*" is the wrong tool here (it would
