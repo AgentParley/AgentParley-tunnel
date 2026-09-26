@@ -11,10 +11,10 @@ allow_commands: []   # matched against the RAW command text; "*" crosses "/" —
 deny_commands: []
 enabled: true
 
-# Local model harnesses: THE way to expose them is `agentparley-tunnel register` (no argument) — it scans codex,
+# Local model harnesses: THE way to expose them is `agentparley register` (no argument) — it scans codex,
 # claude, ollama, and openai-compatible-local, auto-discovering a CLI installed under your login shell (nvm,
 # ~/.npm-global) or a local server on a well-known port, and persists what it finds to
-# /var/lib/agentparley-tunnel/harnesses.json — no config.yaml edit, no restart. `register <harness>` /
+# /var/lib/agentparley/harnesses.json — no config.yaml edit, no restart. `register <harness>` /
 # `unregister <harness>` work on just one. Everything below is OPTIONAL — set only to override what `register`
 # would find on its own, or to supply what it can't (a bespoke server's URL, a model's context window). See the
 # tunnel design doc's non-agentic pin for why the CLI harnesses never take arbitrary flags from config.

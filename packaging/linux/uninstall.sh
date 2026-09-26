@@ -4,18 +4,18 @@
 #   curl -fsSL https://get.agentparley.ai/tunnel/uninstall.sh | sudo sh
 #
 # Does NOT delete the run-as user by default (it may be a pre-existing account with a home directory the
-# operator wants kept) — set AGENTPARLEY_TUNNEL_DELETE_USER=true (or pass --delete-user if run from a downloaded
+# operator wants kept) — set AGENTPARLEY_DELETE_USER=true (or pass --delete-user if run from a downloaded
 # copy) to remove a user this install.sh created.
 #
 # POSIX sh, same truncation-proofing as install.sh: everything lives in a function, last line is `main "$@"`.
 set -eu
 
-BINARY_NAME="agentparley-tunnel"
+BINARY_NAME="agentparley"
 INSTALL_BIN_DIR="/usr/local/bin"
-CONFIG_DIR="/etc/agentparley-tunnel"
-STATE_DIR="/var/lib/agentparley-tunnel"
+CONFIG_DIR="/etc/agentparley"
+STATE_DIR="/var/lib/agentparley"
 UNIT_DIR="/etc/systemd/system"
-UNIT_NAME="agentparley-tunnel.service"
+UNIT_NAME="agentparley.service"
 
 fail() {
 	echo "$@" >&2
@@ -29,7 +29,7 @@ check_root() {
 }
 
 parse_args() {
-	DELETE_USER="${AGENTPARLEY_TUNNEL_DELETE_USER:-false}"
+	DELETE_USER="${AGENTPARLEY_DELETE_USER:-false}"
 	for arg in "$@"; do
 		case "$arg" in
 		--delete-user)

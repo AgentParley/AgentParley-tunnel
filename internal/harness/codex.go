@@ -81,7 +81,7 @@ func (h *codexHarness) Detect(ctx context.Context) error {
 	resolvedPath, err := exec.LookPath(h.command)
 	if err != nil {
 		if filepath.IsAbs(h.command) {
-			return fmt.Errorf("%q no longer exists — it may have been moved or uninstalled; re-run 'agentparley-tunnel register' to rediscover codex: %w", h.command, err)
+			return fmt.Errorf("%q no longer exists — it may have been moved or uninstalled; re-run 'agentparley register' to rediscover codex: %w", h.command, err)
 		}
 		return fmt.Errorf("codex CLI (%q) not found on PATH: %w", h.command, err)
 	}

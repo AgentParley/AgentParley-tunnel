@@ -1,11 +1,11 @@
 #!/bin/sh
-# Hosted, argument-free installer for the agentparley-tunnel daemon.
+# Hosted, argument-free installer for the agentparley daemon.
 #
 #   curl -fsSL https://get.agentparley.ai/tunnel/install.sh | sudo sh
 #
 # A piped script has no argv, so every override is an environment variable — see the README for the full list
-# (AGENTPARLEY_TUNNEL_USER, AGENTPARLEY_TUNNEL_API_SERVER, AGENTPARLEY_TUNNEL_EGRESS_SERVER,
-# AGENTPARLEY_TUNNEL_UPDATE_SERVER, AGENTPARLEY_TUNNEL_BINARY). Deliberately does NOT run `agentparley-tunnel login` —
+# (AGENTPARLEY_USER, AGENTPARLEY_API_SERVER, AGENTPARLEY_EGRESS_SERVER,
+# AGENTPARLEY_UPDATE_SERVER, AGENTPARLEY_BINARY). Deliberately does NOT run `agentparley login` —
 # the device-grant approval is an interactive, separate step (install, THEN login, THEN start).
 #
 # POSIX sh on purpose (no bash-isms): plain [ ] tests, no arrays, no [[ ]]. Everything below lives inside a
@@ -14,13 +14,13 @@
 # script. `curl -f` alone only catches a bad HTTP status, not a truncated body, so this is the actual mitigation.
 set -eu
 
-BINARY_NAME="agentparley-tunnel"
+BINARY_NAME="agentparley"
 INSTALL_BIN_DIR="/usr/local/bin"
-CONFIG_DIR="/etc/agentparley-tunnel"
+CONFIG_DIR="/etc/agentparley"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
-STATE_DIR="/var/lib/agentparley-tunnel"
+STATE_DIR="/var/lib/agentparley"
 UNIT_DIR="/etc/systemd/system"
-UNIT_NAME="agentparley-tunnel.service"
+UNIT_NAME="agentparley.service"
 
 DEFAULT_API_SERVER="https://services.agentparley.ai/platform"
 DEFAULT_EGRESS_SERVER="services.agentparley.ai:443"
@@ -51,7 +51,7 @@ check_systemd() {
 check_os() {
 	OS_NAME="$(uname -s)"
 	if [ "$OS_NAME" != "Linux" ]; then
-		fail "this installer supports Linux only (found: $OS_NAME) — there is no macOS or Windows build of agentparley-tunnel."
+		fail "this installer supports Linux only (found: $OS_NAME) — there is no macOS or Windows build of agentparley."
 	fi
 }
 
@@ -65,25 +65,25 @@ detect_arch() {
 		GOARCH="arm64"
 		;;
 	*)
-		fail "unsupported CPU architecture: $MACHINE_ARCH — agentparley-tunnel is built for x86_64 and aarch64/arm64 only."
+		fail "unsupported CPU architecture: $MACHINE_ARCH — agentparley is built for x86_64 and aarch64/arm64 only."
 		;;
 	esac
 }
 
 resolve_run_as_user() {
-	RUN_AS_USER="${AGENTPARLEY_TUNNEL_USER:-${SUDO_USER:-}}"
+	RUN_AS_USER="${AGENTPARLEY_USER:-${SUDO_USER:-}}"
 	if [ -z "$RUN_AS_USER" ] || [ "$RUN_AS_USER" = "root" ]; then
 		echo "no run-as user could be determined (ran as root directly, with no SUDO_USER) — the daemon has no" >&2
 		echo "privilege to switch users, so it must run as, and only as, the account whose behalf commands run on." >&2
-		fail "re-run as: curl -fsSL $INSTALL_SCRIPT_URL | sudo AGENTPARLEY_TUNNEL_USER=<name> sh"
+		fail "re-run as: curl -fsSL $INSTALL_SCRIPT_URL | sudo AGENTPARLEY_USER=<name> sh"
 	fi
 }
 
 resolve_settings() {
-	API_SERVER="${AGENTPARLEY_TUNNEL_API_SERVER:-$DEFAULT_API_SERVER}"
-	EGRESS_SERVER="${AGENTPARLEY_TUNNEL_EGRESS_SERVER:-$DEFAULT_EGRESS_SERVER}"
-	UPDATE_SERVER="${AGENTPARLEY_TUNNEL_UPDATE_SERVER:-$DEFAULT_UPDATE_SERVER}"
-	LOCAL_BINARY="${AGENTPARLEY_TUNNEL_BINARY:-}"
+	API_SERVER="${AGENTPARLEY_API_SERVER:-$DEFAULT_API_SERVER}"
+	EGRESS_SERVER="${AGENTPARLEY_EGRESS_SERVER:-$DEFAULT_EGRESS_SERVER}"
+	UPDATE_SERVER="${AGENTPARLEY_UPDATE_SERVER:-$DEFAULT_UPDATE_SERVER}"
+	LOCAL_BINARY="${AGENTPARLEY_BINARY:-}"
 }
 
 fetch() {
@@ -124,7 +124,7 @@ download_and_verify() {
 
 use_local_binary() {
 	if [ ! -f "$LOCAL_BINARY" ]; then
-		fail "AGENTPARLEY_TUNNEL_BINARY=$LOCAL_BINARY does not exist."
+		fail "AGENTPARLEY_BINARY=$LOCAL_BINARY does not exist."
 	fi
 	BINARY_SOURCE="$LOCAL_BINARY"
 	INSTALLED_VERSION="local ($LOCAL_BINARY)"
@@ -184,7 +184,7 @@ Type=simple
 # install.sh writes this to the run-as user it resolved (matching config.yaml's run_as — the daemon refuses to
 # start on a mismatch; see internal/shellrun.VerifyMatchesProcess).
 User=$RUN_AS_USER
-ExecStart=/usr/local/bin/agentparley-tunnel start
+ExecStart=/usr/local/bin/agentparley start
 Restart=always
 RestartSec=5
 
@@ -205,9 +205,11 @@ NoNewPrivileges=yes
 # Bounds the whole activation, ExecStartPre included. systemd's default is 90s; a ~20 MB binary download on a
 # slow link (DSL/cellular) can exceed that, and a timed-out ExecStartPre aborts the WHOLE unit — the \`-\` prefix
 # does NOT excuse a timeout, only a non-zero exit — so Restart=always would then loop the download forever and
-# the tunnel would never start. 420s sits safely above self-update's own internal deadlines below.
+# the tunnel would never start. 420s sits safely above update's own internal deadlines below.
 TimeoutStartSec=420
-ExecStartPre=-+/usr/local/bin/agentparley-tunnel self-update
+# --from-service both skips the restart (ExecStart below is about to (re)start the daemon anyway) and honors
+# auto_update: false — the ONLY caller that does; \`sudo agentparley update\` typed by a human always updates.
+ExecStartPre=-+/usr/local/bin/agentparley update --from-service
 
 # NO filesystem sandboxing directives here on purpose (no ProtectSystem, PrivateTmp, ProtectHome, ReadOnlyPaths,
 # …). This daemon's entire job is running commands and reading/writing files as an arbitrary path the AGENT
@@ -234,10 +236,11 @@ enable_service_and_report() {
 	systemctl enable "$UNIT_NAME"
 
 	echo ""
-	echo "Installed agentparley-tunnel ($INSTALLED_VERSION). Next steps:"
+	echo "Installed agentparley ($INSTALLED_VERSION). Next steps:"
 	echo "  1. sudo -u $RUN_AS_USER $INSTALL_BIN_DIR/$BINARY_NAME login"
 	echo "  2. sudo systemctl start $UNIT_NAME"
 	echo "  3. sudo -u $RUN_AS_USER $INSTALL_BIN_DIR/$BINARY_NAME register   # optional: discover and register any local model harnesses (codex, claude, ollama, ...)"
+	echo "  4. sudo -u $RUN_AS_USER $INSTALL_BIN_DIR/$BINARY_NAME doctor     # optional: diagnose if anything above doesn't look right"
 
 	if [ "$WAS_ACTIVE" = "true" ]; then
 		echo ""

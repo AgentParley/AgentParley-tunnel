@@ -25,7 +25,7 @@ import (
 // ErrExpired and ErrDenied are terminal outcomes — the daemon stops polling and tells the user to run `login`
 // again (expired) or that the request was rejected (denied), rather than retrying forever.
 var (
-	ErrExpired = errors.New("device code expired — run 'agentparley-tunnel login' again")
+	ErrExpired = errors.New("device code expired — run 'agentparley login' again")
 	ErrDenied  = errors.New("device authorization was denied")
 )
 

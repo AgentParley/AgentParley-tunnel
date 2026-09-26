@@ -15,7 +15,7 @@ type Credentials struct {
 }
 
 // Store persists Credentials to disk. Load returns (nil, nil) — not an error — when no credentials have been
-// saved yet, since "never logged in" is an expected state for `agentparley-tunnel login` to detect.
+// saved yet, since "never logged in" is an expected state for `agentparley login` to detect.
 type Store interface {
 	Load() (*Credentials, error)
 	Save(credentials *Credentials) error

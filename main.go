@@ -1,19 +1,21 @@
-// Command agentparley-tunnel is the on-box daemon: it dials out to the SSH egress service and holds the
-// connection open so AgentParley can run commands on this box with no inbound port and no firewall change. Seven
-// verbs, stdlib flag (no cobra — seven verbs do not justify the dependency):
+// Command agentparley is the on-box daemon: it dials out to the SSH egress service and holds the connection open
+// so AgentParley can run commands on this box with no inbound port and no firewall change. Eight verbs, stdlib
+// flag (no cobra — eight verbs do not justify the dependency):
 //
-//	agentparley-tunnel login        — RFC 8628 device grant, generates this box's Ed25519 identity, enrols
-//	agentparley-tunnel start        — runs the connect loop in the foreground (systemd's ExecStart)
-//	agentparley-tunnel status       — prints whether credentials exist and what the config says
-//	agentparley-tunnel logout       — deregisters and wipes local state
-//	agentparley-tunnel register     — with no argument, scans and registers every available harness (codex,
-//	                                  claude, ollama, openai-compatible-local); register <harness> does just that
-//	                                  one. Either way, discovery (finding a CLI installed outside this process's
-//	                                  own PATH, or a local OpenAI-compatible server on a well-known port) runs
-//	                                  first — see internal/harness/discovery.go
-//	agentparley-tunnel unregister   — removes this box's provider for one harness
-//	agentparley-tunnel self-update  — checks for and installs a newer (or rolled-back) release (systemd's
-//	                                  ExecStartPre, runs as root just before every start)
+//	agentparley login        — RFC 8628 device grant, generates this box's Ed25519 identity, enrols
+//	agentparley start        — runs the connect loop in the foreground (systemd's ExecStart)
+//	agentparley status       — prints whether credentials exist and what the config says
+//	agentparley logout       — deregisters and wipes local state
+//	agentparley register     — with no argument, scans and registers every available harness (codex,
+//	                            claude, ollama, openai-compatible-local); register <harness> does just that
+//	                            one. Either way, discovery (finding a CLI installed outside this process's
+//	                            own PATH, or a local OpenAI-compatible server on a well-known port) runs
+//	                            first — see internal/harness/discovery.go
+//	agentparley unregister   — removes this box's provider for one harness
+//	agentparley update       — checks for and installs a newer (or rolled-back) release, and restarts the
+//	                            systemd unit if it was active; systemd's ExecStartPre runs this (as
+//	                            `update --from-service`) as root just before every start
+//	agentparley doctor       — read-only diagnosis: version, config, service, connectivity, clock, providers
 package main
 
 import (
@@ -23,6 +25,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -37,6 +40,10 @@ import (
 	"github.com/agentparley/tunnel/internal/shellrun"
 	"github.com/agentparley/tunnel/internal/version"
 )
+
+// systemdUnitName is the unit install.sh writes — shared by `update`'s post-install restart and `doctor`'s
+// service check.
+const systemdUnitName = "agentparley.service"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -58,8 +65,10 @@ func main() {
 		err = runRegister(os.Args[2:])
 	case "unregister":
 		err = runUnregister(os.Args[2:])
-	case "self-update":
-		err = runSelfUpdate(os.Args[2:])
+	case "update":
+		err = runUpdate(os.Args[2:])
+	case "doctor":
+		err = runDoctor(os.Args[2:])
 	case "ws":
 		err = runWs(os.Args[2:])
 	case "-h", "--help", "help":
@@ -71,13 +80,13 @@ func main() {
 	}
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "agentparley-tunnel:", err)
+		fmt.Fprintln(os.Stderr, "agentparley:", err)
 		os.Exit(1)
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: agentparley-tunnel <login|start|status|logout|register [harness]|unregister <harness>|self-update|ws> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: agentparley <login|start|status|logout|register [harness]|unregister <harness>|update|doctor|ws> [flags]")
 }
 
 func runLogin(args []string) error {
@@ -104,7 +113,7 @@ func runLogin(args []string) error {
 		return fmt.Errorf("saving credentials: %w", err)
 	}
 
-	fmt.Printf("Enrolled as ssh host %s. Enable the service with:\n  sudo systemctl enable --now agentparley-tunnel\n", result.Credentials.SSHHostID)
+	fmt.Printf("Enrolled as ssh host %s. Enable the service with:\n  sudo systemctl enable --now agentparley\n", result.Credentials.SSHHostID)
 	return nil
 }
 
@@ -145,14 +154,14 @@ func runStatus(args []string) error {
 		return err
 	}
 
-	fmt.Println("agentparley-tunnel", version.Version)
+	fmt.Println("agentparley", version.Version)
 
 	credentials, err := credstore.New().Load()
 	if err != nil {
 		return err
 	}
 	if credentials == nil {
-		fmt.Println("not logged in — run 'agentparley-tunnel login'")
+		fmt.Println("not logged in — run 'agentparley login'")
 		return nil
 	}
 	fmt.Printf("ssh host id: %s\n", credentials.SSHHostID)
@@ -213,7 +222,7 @@ func runRegister(args []string) error {
 		return err
 	}
 	if flagSet.NArg() > 1 {
-		return fmt.Errorf("usage: agentparley-tunnel register [harness]")
+		return fmt.Errorf("usage: agentparley register [harness]")
 	}
 
 	tunnelConfig, credentials, runAsUser, err := loadConfigAndCredentials(*configPath)
@@ -361,7 +370,7 @@ func runUnregister(args []string) error {
 		return err
 	}
 	if flagSet.NArg() != 1 {
-		return fmt.Errorf("usage: agentparley-tunnel unregister <harness>")
+		return fmt.Errorf("usage: agentparley unregister <harness>")
 	}
 	harnessName := flagSet.Arg(0)
 
@@ -381,7 +390,7 @@ func runUnregister(args []string) error {
 // loadConfigAndCredentials is the shared prologue for register/unregister: load the config, prove the DAEMON's own
 // identity can drive a harness (run_as bounds a CLI harness's read-and-quote exposure to exactly that OS user's
 // files, exactly like runStart does before it ever starts serving operations — skipping this would let
-// `sudo agentparley-tunnel register claude` probe root's ~/.claude and register successfully, while every turn at
+// `sudo agentparley register claude` probe root's ~/.claude and register successfully, while every turn at
 // invoke time, run as the daemon's real run_as user, fails with an unexplainable "is_error: true"), then load the
 // stored credentials. unregister shares the run_as check for symmetry even though it never touches the harness. The
 // returned runAsUser is what register's own discovery (internal/harness.Discover) asks a login shell on behalf of.
@@ -404,28 +413,83 @@ func loadConfigAndCredentials(configPath string) (*config.Config, *credstore.Cre
 		return nil, nil, nil, err
 	}
 	if credentials == nil {
-		return nil, nil, nil, fmt.Errorf("not logged in — run 'agentparley-tunnel login' first")
+		return nil, nil, nil, fmt.Errorf("not logged in — run 'agentparley login' first")
 	}
 
 	return tunnelConfig, credentials, runAsUser, nil
 }
 
-// runSelfUpdate is systemd's ExecStartPre step, run as root just before every daemon start. A broken config must
-// not block startup any more than a failed update would, so a config load failure logs and returns nil rather
-// than propagating — the caller (systemd, via the unit's `-` prefix) starts the daemon regardless either way, but
-// this keeps the exit code 0 on its own terms instead of relying on that prefix.
-func runSelfUpdate(args []string) error {
-	flagSet := flag.NewFlagSet("self-update", flag.ExitOnError)
+// runUpdate is `agentparley update`: check the published version pointer and, if it differs, download, verify, and
+// atomically swap in the new binary — see internal/selfupdate. Two callers need very different failure contracts,
+// which is why there are two flags rather than one:
+//
+//   - A human typing `sudo agentparley update` always updates, config setting or not (typing the command IS the
+//     explicit instruction), every failure is reported and the command exits non-zero, and the systemd unit (if
+//     installed and currently active) is restarted afterward so the new binary actually takes effect. --no-restart
+//     skips only that last step, e.g. ahead of a planned maintenance window.
+//   - The systemd unit's own ExecStartPre passes --from-service: the ONE caller that honors `auto_update: false`,
+//     and it implies --no-restart (ExecStart is about to (re)start the daemon right after) and CheckFailOpen's
+//     log-and-swallow behavior (a broken update check must never block startup).
+func runUpdate(args []string) error {
+	flagSet := flag.NewFlagSet("update", flag.ExitOnError)
 	configPath := flagSet.String("config", config.DefaultPath, "path to config.yaml")
+	noRestart := flagSet.Bool("no-restart", false, "install the update but don't restart the systemd unit")
+	fromService := flagSet.Bool("from-service", false, "internal: invoked by the systemd unit's ExecStartPre — honors auto_update: false, implies --no-restart, and never fails the caller")
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
 
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("must run as root: sudo agentparley update")
+	}
+
 	tunnelConfig, err := config.Load(*configPath)
 	if err != nil {
-		log.Printf("self-update: loading config %s: %v", *configPath, err)
+		if *fromService {
+			log.Printf("update: loading config %s: %v", *configPath, err)
+			return nil
+		}
+		return err
+	}
+
+	if *fromService {
+		selfupdate.CheckFailOpen(tunnelConfig)
 		return nil
 	}
 
-	return selfupdate.Run(tunnelConfig)
+	result, err := selfupdate.Check(tunnelConfig.UpdateServer)
+	if err != nil {
+		return fmt.Errorf("checking for update: %w", err)
+	}
+	if !result.Updated {
+		fmt.Printf("already up to date (%s)\n", result.PreviousVersion)
+		return nil
+	}
+	fmt.Printf("updated %s -> %s\n", result.PreviousVersion, result.LatestVersion)
+
+	if *noRestart {
+		return nil
+	}
+	return restartServiceIfActive()
+}
+
+// restartServiceIfActive restarts systemdUnitName only when it's currently active — a box that never enabled the
+// service (a manual/dev checkout) or has it stopped on purpose shouldn't have `update` start it.
+func restartServiceIfActive() error {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return nil
+	}
+	if err := exec.Command("systemctl", "is-active", "--quiet", systemdUnitName).Run(); err != nil {
+		return nil // not installed, or installed but not active — nothing to restart
+	}
+
+	fmt.Printf("restarting %s...\n", systemdUnitName)
+	restartCmd := exec.Command("systemctl", "restart", systemdUnitName)
+	restartCmd.Stdout = os.Stdout
+	restartCmd.Stderr = os.Stderr
+	if err := restartCmd.Run(); err != nil {
+		return fmt.Errorf("restarting %s: %w", systemdUnitName, err)
+	}
+	fmt.Printf("restarted %s\n", systemdUnitName)
+	return nil
 }

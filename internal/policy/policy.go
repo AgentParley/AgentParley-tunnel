@@ -15,7 +15,7 @@ import (
 // same string for every reason (disabled, read-only, command list), matching the plan's single denial code.
 var ErrDenied = errors.New("policy_denied")
 
-// Policy evaluates a live config.Config on every check, so `agentparley-tunnel start` picking up a fresh config
+// Policy evaluates a live config.Config on every check, so `agentparley start` picking up a fresh config
 // only requires a config reload, not a policy rebuild.
 type Policy struct {
 	tunnelConfig *config.Config

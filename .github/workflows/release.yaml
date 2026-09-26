@@ -1,4 +1,4 @@
-# Publishes a new agentparley-tunnel release to https://get.agentparley.ai — triggered by a git tag, never by a
+# Publishes a new agentparley release to https://get.agentparley.ai — triggered by a git tag, never by a
 # push to main, so shipping a new binary to every customer's box on its next start is a deliberate act rather than
 # something that follows from a plain commit.
 #
@@ -48,11 +48,11 @@ jobs:
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
               -ldflags "-s -w -X github.com/agentparley/tunnel/internal/version.Version=$VERSION" \
-              -o "dist/agentparley-tunnel-linux-$arch" .
+              -o "dist/agentparley-linux-$arch" .
           done
-          # Sidecar checksums install.sh and the daemon's self-update both verify the download against. Written from
+          # Sidecar checksums install.sh and the daemon's update both verify the download against. Written from
           # inside dist/ so each line carries the bare filename, which is what `sha256sum -c` expects.
-          cd dist && for f in agentparley-tunnel-linux-amd64 agentparley-tunnel-linux-arm64; do sha256sum "$f" > "$f.sha256"; done && cd ..
+          cd dist && for f in agentparley-linux-amd64 agentparley-linux-arm64; do sha256sum "$f" > "$f.sha256"; done && cd ..
           echo "$VERSION" > dist/latest-version
 
       - uses: aws-actions/configure-aws-credentials@v4
@@ -69,7 +69,7 @@ jobs:
             echo "s3://$BUCKET/releases/$VERSION/ already exists — versions are write-once, bump the version and re-tag"
             exit 1
           fi
-          aws s3 cp dist/ "s3://$BUCKET/releases/$VERSION/" --recursive --exclude "*" --include "agentparley-tunnel-linux-*" \
+          aws s3 cp dist/ "s3://$BUCKET/releases/$VERSION/" --recursive --exclude "*" --include "agentparley-linux-*" \
             --cache-control "public, max-age=31536000, immutable"
           for script in install.sh uninstall.sh; do
             aws s3 cp "packaging/linux/$script" "s3://$BUCKET/tunnel/$script" \

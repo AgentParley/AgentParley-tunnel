@@ -40,6 +40,20 @@ func discoveryFilePath() string {
 	return filepath.Join(credstore.StateDir(), discoveryFileName)
 }
 
+// DiscoveredNames returns the harness names `register` has already discovered and persisted on this box, read-only
+// — `doctor` uses this to know which harnesses to probe without re-running discovery (which writes to disk) itself.
+func DiscoveredNames() ([]string, error) {
+	discoveries, err := loadDiscoveries()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(discoveries))
+	for name := range discoveries {
+		names = append(names, name)
+	}
+	return names, nil
+}
+
 func loadDiscoveries() (map[string]discoveredHarness, error) {
 	data, err := os.ReadFile(discoveryFilePath())
 	if errors.Is(err, os.ErrNotExist) {
@@ -147,7 +161,7 @@ func discoverCLI(harnessName, defaultCommand string, tunnelConfig *config.Config
 	// already refuses register entirely on a run_as mismatch before Discover is ever reached, so this only ever
 	// fires as a second line of defense.
 	if os.Getuid() != runAsUser.UID {
-		return false, fmt.Sprintf("not on this process's PATH — re-run as: sudo -u %s agentparley-tunnel register", runAsUser.Username), nil
+		return false, fmt.Sprintf("not on this process's PATH — re-run as: sudo -u %s agentparley register", runAsUser.Username), nil
 	}
 	return false, "", nil
 }

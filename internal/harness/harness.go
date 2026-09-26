@@ -83,7 +83,7 @@ func Resolve(harnessName string, tunnelConfig *config.Config) (Harness, error) {
 	case OpenAICompatibleLocal:
 		merged := withDiscoveredURL(harnessConfig, discovered)
 		if merged.URL == "" {
-			return nil, fmt.Errorf("harness %q requires harnesses.%s.url in config, or run `agentparley-tunnel register` to auto-discover a local server — there is no built-in default for a bespoke OpenAI-compatible server", harnessName, harnessName)
+			return nil, fmt.Errorf("harness %q requires harnesses.%s.url in config, or run `agentparley register` to auto-discover a local server — there is no built-in default for a bespoke OpenAI-compatible server", harnessName, harnessName)
 		}
 		return newOpenAICompatibleLocalHarness(merged), nil
 	default:

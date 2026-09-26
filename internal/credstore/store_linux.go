@@ -9,11 +9,12 @@ import (
 )
 
 const (
-	systemStateDir   = "/var/lib/agentparley-tunnel"
-	userStateDirName = ".agentparley"
-	stateDirEnvVar   = "AGENTPARLEY_TUNNEL_STATE_DIR"
-	dirMode          = 0o700
-	fileMode         = 0o600
+	systemStateDir      = "/var/lib/agentparley"
+	userStateDirName    = ".agentparley"
+	stateDirEnvVar      = "AGENTPARLEY_STATE_DIR"
+	credentialsFileName = "credentials.json"
+	dirMode             = 0o700
+	fileMode            = 0o600
 )
 
 var resolveStateDirOnce sync.Once
@@ -82,31 +83,41 @@ func (linuxStore) Delete() error {
 	return err
 }
 
-// StateDir is the shared root other packages persist under (credentials, the machine-id fallback), resolved in one
-// place so every writer agrees. Root keeps the FHS location the packaged systemd unit installs; anyone else gets
-// ~/.agentparley, because "register the box you already own" cannot require sudo to enrol a laptop — and a user who
-// cannot write /var/lib would otherwise fail at `login` with a bare permission error. The env var overrides both,
-// for containers and tests that want an explicit path.
+// StateDir is the shared root other packages persist under (credentials, the machine-id fallback), resolved once
+// for THIS process so every writer agrees. See StateDirFor for the rule itself.
 func StateDir() string {
 	resolveStateDirOnce.Do(func() {
-		if override := os.Getenv(stateDirEnvVar); override != "" {
-			resolvedStateDir = override
-			return
-		}
-		if os.Geteuid() == 0 {
-			resolvedStateDir = systemStateDir
-			return
-		}
 		home, err := os.UserHomeDir()
 		if err != nil {
-			resolvedStateDir = systemStateDir
-			return
+			home = ""
 		}
-		resolvedStateDir = filepath.Join(home, userStateDirName)
+		resolvedStateDir = StateDirFor(os.Geteuid(), home)
 	})
 	return resolvedStateDir
 }
 
+// StateDirFor is StateDir's rule applied to an arbitrary (uid, home) pair rather than the current process's own —
+// `doctor` uses this to locate the run_as user's credentials/harnesses files without itself running as that user.
+// Root keeps the FHS location the packaged systemd unit installs; anyone else gets ~/.agentparley, because
+// "register the box you already own" cannot require sudo to enrol a laptop — and a user who cannot write /var/lib
+// would otherwise fail at `login` with a bare permission error. The env var overrides both, for containers and
+// tests that want an explicit path, and applies regardless of which uid/home is asked about — it names one path for
+// the whole box, not a per-user one.
+func StateDirFor(uid int, home string) string {
+	if override := os.Getenv(stateDirEnvVar); override != "" {
+		return override
+	}
+	if uid == 0 || home == "" {
+		return systemStateDir
+	}
+	return filepath.Join(home, userStateDirName)
+}
+
 func credentialsPath() string {
-	return filepath.Join(StateDir(), "credentials.json")
+	return filepath.Join(StateDir(), credentialsFileName)
+}
+
+// CredentialsPathFor is credentialsPath generalized to an arbitrary (uid, home) pair — see StateDirFor.
+func CredentialsPathFor(uid int, home string) string {
+	return filepath.Join(StateDirFor(uid, home), credentialsFileName)
 }

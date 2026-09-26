@@ -99,7 +99,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("loading stored credentials: %w", err)
 	}
 	if creds == nil {
-		return fmt.Errorf("not logged in — run 'agentparley-tunnel login' first")
+		return fmt.Errorf("not logged in — run 'agentparley login' first")
 	}
 
 	go d.runLedgerSweep(ctx)

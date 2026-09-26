@@ -1,5 +1,5 @@
 MODULE      := github.com/agentparley/tunnel
-BINARY      := agentparley-tunnel
+BINARY      := agentparley
 PROTO_DIR   := proto
 PROTO_OUT   := internal/proto
 DIST_DIR    := dist

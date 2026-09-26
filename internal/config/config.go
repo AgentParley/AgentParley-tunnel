@@ -1,5 +1,5 @@
-// Package config reads /etc/agentparley-tunnel/config.yaml — the daemon's only configuration file. Nothing in this
-// package touches state. Durable identity (credentials, machine id) lives under /var/lib/agentparley-tunnel/,
+// Package config reads /etc/agentparley/config.yaml — the daemon's only configuration file. Nothing in this
+// package touches state. Durable identity (credentials, machine id) lives under /var/lib/agentparley/,
 // owned by internal/credstore. The session ledger and per-session shell state are deliberately NOT durable — they
 // live under a tmpfs root (internal/sessions.stateRoot), so they are gone after a reboot, never on persistent disk.
 package config
@@ -12,7 +12,7 @@ import (
 )
 
 // DefaultPath is where the packaged systemd unit points the daemon.
-const DefaultPath = "/etc/agentparley-tunnel/config.yaml"
+const DefaultPath = "/etc/agentparley/config.yaml"
 
 // Server names the two control-plane hosts the daemon talks to: the PlatformApi for login/enrol/refresh, and the
 // SSH egress service for the long-lived Connect stream. They are deliberately separate — the design doc keeps the
@@ -38,8 +38,9 @@ type Config struct {
 	// reasonable default, not a misconfiguration.
 	MaxConcurrentOperations int `yaml:"max_concurrent_operations"`
 
-	// UpdateServer and AutoUpdate govern the `self-update` subcommand run by systemd's ExecStartPre. Unlike
-	// Enabled/RunAs, an absent value here IS a safe default — self-update should work out of the box.
+	// UpdateServer and AutoUpdate govern the `update` subcommand's automatic path — systemd's ExecStartPre runs
+	// `agentparley update --from-service` before every start. Unlike Enabled/RunAs, an absent value here IS a
+	// safe default — updating should work out of the box.
 	UpdateServer string `yaml:"update_server"`
 	AutoUpdate   bool   `yaml:"auto_update"`
 
@@ -71,8 +72,9 @@ type HarnessModelConfig struct {
 	ContextWindowTokens int    `yaml:"context_window_tokens"`
 }
 
-// defaultUpdateServer is where install.sh points self-update when the customer didn't override it.
-const defaultUpdateServer = "https://get.agentparley.ai"
+// DefaultUpdateServer is where install.sh points `update` when the customer didn't override it, and what `doctor`
+// checks against when config.yaml can't be loaded at all.
+const DefaultUpdateServer = "https://get.agentparley.ai"
 
 // Load reads and parses the config file at path. There is no built-in default for Enabled/RunAs — an operator-less
 // config is a misconfiguration, not a safe default, so a missing or malformed file is a hard error rather than a
@@ -86,7 +88,7 @@ func Load(path string) (*Config, error) {
 
 	tunnelConfig := Config{
 		AutoUpdate:   true,
-		UpdateServer: defaultUpdateServer,
+		UpdateServer: DefaultUpdateServer,
 	}
 	if err := yaml.Unmarshal(data, &tunnelConfig); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)

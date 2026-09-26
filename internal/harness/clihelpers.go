@@ -99,11 +99,11 @@ func runCLI(ctx context.Context, command string, args []string, prompt string, e
 	// it, so this checks first and gives the fix.
 	if filepath.IsAbs(command) {
 		if _, statErr := os.Stat(command); statErr != nil {
-			return InvokeOutcome{}, fmt.Errorf("%q no longer exists (moved or uninstalled?) — re-run 'agentparley-tunnel register' to rediscover it: %w", command, statErr)
+			return InvokeOutcome{}, fmt.Errorf("%q no longer exists (moved or uninstalled?) — re-run 'agentparley register' to rediscover it: %w", command, statErr)
 		}
 	}
 
-	workingDir, err := os.MkdirTemp("", "agentparley-tunnel-harness-*")
+	workingDir, err := os.MkdirTemp("", "agentparley-harness-*")
 	if err != nil {
 		return InvokeOutcome{}, fmt.Errorf("creating a working directory for %s: %w", command, err)
 	}
