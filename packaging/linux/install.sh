@@ -5,7 +5,7 @@
 #
 # A piped script has no argv, so every override is an environment variable — see the README for the full list
 # (AGENTPARLEY_USER, AGENTPARLEY_API_SERVER, AGENTPARLEY_EGRESS_SERVER,
-# AGENTPARLEY_UPDATE_SERVER, AGENTPARLEY_BINARY). Deliberately does NOT run `agentparley login` —
+# AGENTPARLEY_UPDATE_SERVER, AGENTPARLEY_VERSION, AGENTPARLEY_BINARY). Deliberately does NOT run `agentparley login` —
 # the device-grant approval is an interactive, separate step (install, THEN login, THEN start).
 #
 # POSIX sh on purpose (no bash-isms): plain [ ] tests, no arrays, no [[ ]]. Everything below lives inside a
@@ -102,11 +102,14 @@ download_and_verify() {
 	WORKDIR="$(mktemp -d)"
 	trap 'rm -rf "$WORKDIR"' EXIT
 
-	VERSION_FILE="$WORKDIR/latest-version"
-	fetch "$UPDATE_SERVER/latest-version" "$VERSION_FILE"
-	VERSION="$(cat "$VERSION_FILE")"
+	VERSION="${AGENTPARLEY_VERSION:-}"
+	if [ -z "$VERSION" ]; then
+		VERSION_FILE="$WORKDIR/latest-version"
+		fetch "$UPDATE_SERVER/latest-version" "$VERSION_FILE"
+		VERSION="$(cat "$VERSION_FILE")"
+	fi
 	if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-		fail "unexpected content at $UPDATE_SERVER/latest-version — expected a version like 1.2.3, got: $VERSION"
+		fail "unexpected version (AGENTPARLEY_VERSION or $UPDATE_SERVER/latest-version) — expected a version like 1.2.3, got: $VERSION"
 	fi
 
 	RELEASE_BINARY_NAME="${BINARY_NAME}-linux-${GOARCH}"

@@ -10,11 +10,18 @@ import (
 // → 60 s, forever" for a dropped network connection.
 type backoff struct {
 	current time.Duration
+	start   time.Duration
 	max     time.Duration
 }
 
 func newBackoff(maxSeconds int) *backoff {
-	return &backoff{current: time.Second, max: time.Duration(maxSeconds) * time.Second}
+	return &backoff{current: time.Second, start: time.Second, max: time.Duration(maxSeconds) * time.Second}
+}
+
+// newBackoffBetween is newBackoff with an explicit starting delay, for callers whose first retry should not come
+// after one second.
+func newBackoffBetween(start, max time.Duration) *backoff {
+	return &backoff{current: start, start: start, max: max}
 }
 
 func (b *backoff) next() time.Duration {
@@ -29,5 +36,5 @@ func (b *backoff) next() time.Duration {
 }
 
 func (b *backoff) reset() {
-	b.current = time.Second
+	b.current = b.start
 }

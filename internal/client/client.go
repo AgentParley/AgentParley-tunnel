@@ -99,7 +99,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("loading stored credentials: %w", err)
 	}
 	if creds == nil {
-		return fmt.Errorf("not logged in — run 'agentparley login' first")
+		if d.readEnrolmentToken() == "" {
+			return fmt.Errorf("not logged in — run 'agentparley login' first")
+		}
+		creds, err = d.enrolFromTokenFile(ctx)
+		if err != nil {
+			return d.stopOrFail(ctx, err)
+		}
 	}
 
 	go d.runLedgerSweep(ctx)
@@ -122,6 +128,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 		var terminalErr *terminalRefreshError
 		if errors.As(connectErr, &terminalErr) {
+			if terminalErr.loginRejected && d.readEnrolmentToken() != "" {
+				d.logger.Printf("saved login refused (%v); logging in again from %s", connectErr, d.tunnelConfig.EnrolmentTokenFile)
+				creds, err = d.enrolFromTokenFile(ctx)
+				if err != nil {
+					return d.stopOrFail(ctx, err)
+				}
+				reconnectDelay.reset()
+				continue
+			}
 			d.logger.Printf("TERMINAL: %v — not retrying; delete and re-enrol this install", connectErr)
 			return connectErr
 		}
@@ -134,6 +149,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-time.After(wait):
 		}
 	}
+}
+
+// stopOrFail turns a token-file login ending into Run's result: a daemon asked to stop exits cleanly.
+func (d *Daemon) stopOrFail(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 func (d *Daemon) connectOnce(ctx context.Context, creds *credstore.Credentials, onConnected func()) error {

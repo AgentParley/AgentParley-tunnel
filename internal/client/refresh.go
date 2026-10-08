@@ -20,6 +20,9 @@ import (
 // and re-enrol"). Distinguished from a transient network failure so Run's reconnect loop knows to stop.
 type terminalRefreshError struct {
 	detail string
+	// loginRejected is true only when the platform refused the saved login itself (401) — the one case where a token
+	// file may replace it. A bad --insecure target is terminal too, but a new login would not fix it.
+	loginRejected bool
 }
 
 func (e *terminalRefreshError) Error() string {
@@ -66,7 +69,7 @@ func refreshAccessToken(httpClient *http.Client, apiBaseURL string, creds *creds
 	if httpResponse.StatusCode == http.StatusUnauthorized {
 		// The control plane deliberately returns a bare 401 with no body for every refresh rejection — one opaque
 		// failure, so a stolen refresh token and a forged signature look identical on the wire.
-		return "", &terminalRefreshError{detail: "unknown/revoked refresh token, or an invalid possession proof"}
+		return "", &terminalRefreshError{detail: "unknown/revoked refresh token, or an invalid possession proof", loginRejected: true}
 	}
 	if httpResponse.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("refreshing the access token: unexpected status %d", httpResponse.StatusCode)

@@ -58,6 +58,31 @@ exist (defaulting to whichever account ran `sudo`), writes `/etc/agentparley/con
 NOT run `login` for you — approving a new install is a deliberate, interactive step (open the printed URL, type the
 code, click Approve). It is **Linux with systemd only**; the script says so plainly on any other OS.
 
+### Logging in with no person (token file)
+
+On a machine nobody can sit at (a rented computer), skip `login`. If `agentparley start` finds **no saved login, or
+its saved login is rejected**, and a token file exists, it enrols with the token in that file — the same
+`POST /tunnel/enrol` call `login` makes after a device code is approved. A valid saved login always wins over the
+file.
+
+- The file is `/run/agentparley/enrolment-token` unless `enrolment_token_file` in `config.yaml` or
+  `AGENTPARLEY_ENROLMENT_TOKEN_FILE` says otherwise. It must be readable by the run-as user.
+- Only the platform's explicit refusal, a 400 whose JSON body has `code: "enrolment_token_rejected"`, means that token
+  is spent. Everything else is retried with exponential backoff from 5 s to 5 min with jitter, honouring
+  `Retry-After`, and the file is re-read before every try: network errors, 429, any 5xx (including 503
+  `enrolment_not_ready`, a valid grant that is not usable yet), and any other answer (a 404 or 400 from the ingress
+  during a deploy, 403, HTML).
+- A refused token is remembered only until the next boot, as `<boot_id> <hash>` in
+  `/var/lib/agentparley/rejected-enrolment-token` (boot id from `/proc/sys/kernel/random/boot_id`). A record from
+  another boot is ignored and removed, so a reboot always gets one fresh try; where there is no boot id the refusal
+  is kept in memory only. The daemon does not exit; it checks the file once a minute and tries again only when the
+  content has changed.
+- With no saved login and no token file (or an empty one), `start` exits with "not logged in" as before.
+
+`AGENTPARLEY_API_SERVER`, `AGENTPARLEY_EGRESS_SERVER` and `AGENTPARLEY_ENROLMENT_TOKEN_FILE` set in the daemon's
+environment override `server.api`, `server.egress` and `enrolment_token_file` in `config.yaml` (`AGENTPARLEY_HOST`
+still wins for the API address).
+
 A piped script has no arguments, so every override is an environment variable:
 
 | Variable | Default | Overrides |
@@ -66,6 +91,7 @@ A piped script has no arguments, so every override is an environment variable:
 | `AGENTPARLEY_API_SERVER` | `https://services.agentparley.ai/platform` | the Platform API the daemon logs in / refreshes against |
 | `AGENTPARLEY_EGRESS_SERVER` | `services.agentparley.ai:443` | the SSH egress service the daemon connects out to |
 | `AGENTPARLEY_UPDATE_SERVER` | `https://get.agentparley.ai` | where both install.sh and the daemon's `update` check for new releases; written into `config.yaml` as `update_server` only when overridden |
+| `AGENTPARLEY_VERSION` | (unset) | install exactly this release (for example `1.4.2`) instead of the latest — for a machine image that must build the same way every time |
 | `AGENTPARLEY_BINARY` | (unset) | path to a locally built binary — skips the download and checksum entirely, for a dev/checkout install |
 
 Example: `curl -fsSL https://get.agentparley.ai/tunnel/install.sh | sudo AGENTPARLEY_USER=deploy sh`

@@ -44,6 +44,11 @@ type Config struct {
 	UpdateServer string `yaml:"update_server"`
 	AutoUpdate   bool   `yaml:"auto_update"`
 
+	// EnrolmentTokenFile is where a token handed to this box out of band (a rented computer's read-only disk) is
+	// read to log in without a person — only when there is no usable saved login. Defaults to
+	// DefaultEnrolmentTokenFile; AGENTPARLEY_ENROLMENT_TOKEN_FILE overrides it.
+	EnrolmentTokenFile string `yaml:"enrolment_token_file"`
+
 	// Harnesses configures per-harness connection details (URL/command) and model overrides, keyed by harness name
 	// (internal/harness's Codex/Claude/Ollama/OpenAICompatibleLocal constants).
 	Harnesses      map[string]HarnessConfig `yaml:"harnesses"`
@@ -72,6 +77,9 @@ type HarnessModelConfig struct {
 	ContextWindowTokens int    `yaml:"context_window_tokens"`
 }
 
+// DefaultEnrolmentTokenFile is the token file location when config.yaml does not name one.
+const DefaultEnrolmentTokenFile = "/run/agentparley/enrolment-token"
+
 // DefaultUpdateServer is where install.sh points `update` when the customer didn't override it, and what `doctor`
 // checks against when config.yaml can't be loaded at all.
 const DefaultUpdateServer = "https://get.agentparley.ai"
@@ -89,6 +97,8 @@ func Load(path string) (*Config, error) {
 	tunnelConfig := Config{
 		AutoUpdate:   true,
 		UpdateServer: DefaultUpdateServer,
+
+		EnrolmentTokenFile: DefaultEnrolmentTokenFile,
 	}
 	if err := yaml.Unmarshal(data, &tunnelConfig); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
@@ -98,6 +108,18 @@ func Load(path string) (*Config, error) {
 	// rewriting the installed config; it overrides only the API base URL — egress and update are separate hosts.
 	if host := os.Getenv("AGENTPARLEY_HOST"); host != "" {
 		tunnelConfig.Server.APIBaseURL = host
+	}
+
+	// The same names install.sh reads, so one image can be pointed at any environment from the unit's environment
+	// without rewriting config.yaml. AGENTPARLEY_HOST (above) wins over AGENTPARLEY_API_SERVER.
+	if apiServer := os.Getenv("AGENTPARLEY_API_SERVER"); apiServer != "" && os.Getenv("AGENTPARLEY_HOST") == "" {
+		tunnelConfig.Server.APIBaseURL = apiServer
+	}
+	if egressServer := os.Getenv("AGENTPARLEY_EGRESS_SERVER"); egressServer != "" {
+		tunnelConfig.Server.EgressAddress = egressServer
+	}
+	if tokenFile := os.Getenv("AGENTPARLEY_ENROLMENT_TOKEN_FILE"); tokenFile != "" {
+		tunnelConfig.EnrolmentTokenFile = tokenFile
 	}
 	return &tunnelConfig, nil
 }
