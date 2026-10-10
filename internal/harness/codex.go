@@ -100,7 +100,7 @@ func (h *codexHarness) Detect(ctx context.Context) error {
 		return fmt.Errorf("could not parse codex CLI version from %q: %w", strings.TrimSpace(string(versionOutput)), err)
 	}
 	if !isVersionSupported {
-		return fmt.Errorf("codex CLI version %q is older than the minimum %d.%d.%d required to prove the non-agentic pin (--sandbox read-only --skip-git-repo-check -c mcp_servers={}) — upgrade the CLI before registering this harness",
+		return fmt.Errorf("codex CLI version %q is older than the minimum %d.%d.%d required to prove the non-agentic pin (--sandbox read-only --skip-git-repo-check -c mcp_servers={} plus the disabled native-tool features) — upgrade the CLI before registering this harness",
 			strings.TrimSpace(string(versionOutput)), codexMinMajor, codexMinMinor, codexMinPatch)
 	}
 
@@ -213,8 +213,17 @@ func writeOutputSchemaFile(schema string) (path string, cleanup func(), err erro
 	return file.Name(), func() { os.Remove(file.Name()) }, nil
 }
 
+// codexDisabledFeatures switches off every native codex tool. --sandbox read-only alone left the model a working
+// read-only shell (and code-mode exec) on the box, so it ran hidden commands the platform never saw and confused
+// them with its real tools. Verified on codex-cli 0.150.1: with these off, a native exec attempt fails closed
+// ("code-mode host is disabled") and no command_execution item is emitted.
+var codexDisabledFeatures = []string{
+	"shell_tool", "unified_exec", "code_mode_host", "multi_agent", "goals", "view_image", "image_generation",
+	"apps", "plugins", "browser_use", "computer_use", "tool_suggest", "skill_search",
+}
+
 // codexArgs is the FIXED, daemon-owned argv for every codex invocation (Detect's probe and Invoke alike) — never
-// built from wire input beyond model, which Invoke has already checked is a plain model slug. --sandbox read-only blocks writes/shell/network side effects (codex
+// built from wire input beyond model, which Invoke has already checked is a plain model slug. --sandbox read-only blocks writes (codex
 // exec is non-interactive, so any approval prompt reads EOF and auto-declines — no --ask-for-approval flag exists
 // in codex 0.150+); --skip-git-repo-check lets exec run outside a git repo (the box's home dir); -m is omitted
 // only for codexLegacyModelID (a ChatGPT account's own default) and passed explicitly for every other model
@@ -232,6 +241,11 @@ func codexArgs(model, reasoningEffort string) []string {
 		"--skip-git-repo-check",
 		"--sandbox", "read-only",
 		"-c", "mcp_servers={}",
+		"-c", "web_search=disabled",
+		"-c", "include_apply_patch_tool=false",
+	}
+	for _, feature := range codexDisabledFeatures {
+		args = append(args, "-c", "features."+feature+"=false")
 	}
 	if model != codexLegacyModelID {
 		args = append(args, "-m", model)
