@@ -14,8 +14,11 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/agentparley/tunnel/internal/cliround"
 	"github.com/agentparley/tunnel/internal/config"
 	"github.com/agentparley/tunnel/internal/credstore"
+	"github.com/agentparley/tunnel/internal/harness"
+	"github.com/agentparley/tunnel/internal/managedcli"
 	"github.com/agentparley/tunnel/internal/policy"
 	tunnelpb "github.com/agentparley/tunnel/internal/proto"
 	"github.com/agentparley/tunnel/internal/sessions"
@@ -51,21 +54,28 @@ const (
 	sendQueueDepth        = 32
 	receivedQueueDepth    = 1
 	sessionStateTTL       = 72 * time.Hour // SshEgressLimits.SessionStateTtlHours
+	cliSweepInterval      = 30 * time.Second
+	maxGrpcMessageBytes   = 16 << 20 // SshEgress raises the same limits: a CLI round carries a whole history
 )
 
+const defaultWarmIdleMinutes = 30
+
 type Daemon struct {
-	apiBaseURL         string
-	egressAddress      string
-	allowInsecure      bool
-	store              credstore.Store
-	tunnelConfig       *config.Config
-	policy             *policy.Policy
-	ledger             *sessions.Ledger
-	runAsUser          *shellrun.User
-	logger             *log.Logger
-	operationSemaphore chan struct{}
+	apiBaseURL          string
+	egressAddress       string
+	allowInsecure       bool
+	store               credstore.Store
+	tunnelConfig        *config.Config
+	policy              *policy.Policy
+	ledger              *sessions.Ledger
+	runAsUser           *shellrun.User
+	logger              *log.Logger
+	operationSemaphore  chan struct{}
 	workspaceSocketPath string
 	workspaceBridge     *workspaceBridge
+	cliSessions         *cliround.Manager
+	cliDrivers          *harness.CLIDrivers
+	pins                *managedcli.Refresher
 }
 
 func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.Store, tunnelConfig *config.Config, runAsUser *shellrun.User) *Daemon {
@@ -76,20 +86,43 @@ func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.S
 
 	workspaceSocketPath := sessions.WorkspaceSocketPath(runAsUser.Home)
 
+	pins := managedcli.NewRefresher(credstore.StateDir(), log.Default())
+	pins.SetUpdateServer(tunnelConfig.UpdateServer)
+
 	return &Daemon{
-		apiBaseURL:         apiBaseURL,
-		egressAddress:      egressAddress,
-		allowInsecure:      allowInsecure,
-		store:              store,
-		tunnelConfig:       tunnelConfig,
-		policy:             policy.New(tunnelConfig),
-		ledger:             sessions.NewLedger(),
-		runAsUser:          runAsUser,
-		logger:             log.Default(),
-		operationSemaphore: make(chan struct{}, maxConcurrentOperations),
+		apiBaseURL:          apiBaseURL,
+		egressAddress:       egressAddress,
+		allowInsecure:       allowInsecure,
+		store:               store,
+		tunnelConfig:        tunnelConfig,
+		policy:              policy.New(tunnelConfig),
+		ledger:              sessions.NewLedger(),
+		runAsUser:           runAsUser,
+		logger:              log.Default(),
+		operationSemaphore:  make(chan struct{}, maxConcurrentOperations),
 		workspaceSocketPath: workspaceSocketPath,
 		workspaceBridge:     newWorkspaceBridge(workspaceSocketPath, log.Default()),
+		cliSessions:         cliround.NewManager(cliLimits(tunnelConfig), log.Default()),
+		cliDrivers:          harness.NewCLIDrivers(pins, log.Default()),
+		pins:                pins,
 	}
+}
+
+func cliLimits(tunnelConfig *config.Config) map[string]cliround.Limits {
+	limits := map[string]cliround.Limits{}
+	for harnessName, defaultMax := range harness.DefaultMaxWarmSessions() {
+		harnessConfig := tunnelConfig.Harnesses[harnessName]
+		maxWarm := harnessConfig.MaxWarmSessions
+		if maxWarm == 0 {
+			maxWarm = defaultMax
+		}
+		idleMinutes := harnessConfig.WarmIdleMinutes
+		if idleMinutes == 0 {
+			idleMinutes = defaultWarmIdleMinutes
+		}
+		limits[harnessName] = cliround.Limits{MaxWarm: maxWarm, IdleLimit: time.Duration(idleMinutes) * time.Minute}
+	}
+	return limits
 }
 
 // Run blocks until ctx is cancelled (a clean SIGTERM shutdown) or a terminal rejection ends the loop.
@@ -108,6 +141,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 
+	defer d.cliDrivers.Close()
+	defer d.cliSessions.Close()
+	managedcli.PruneOldVersions(d.pins.Current())
+	go d.pins.Run(ctx)
+	go d.runCLISweep(ctx)
 	go d.runLedgerSweep(ctx)
 	go d.workspaceBridge.serveSocket(ctx)
 
@@ -177,6 +215,7 @@ func (d *Daemon) connectOnce(ctx context.Context, creds *credstore.Credentials, 
 			Timeout:             keepAliveTimeout,
 			PermitWithoutStream: true,
 		}),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxGrpcMessageBytes), grpc.MaxCallSendMsgSize(maxGrpcMessageBytes)),
 	)
 	if err != nil {
 		return fmt.Errorf("dialing the egress service: %w", err)
@@ -223,9 +262,9 @@ func (d *Daemon) serve(ctx context.Context, stream tunnelpb.TunnelService_Connec
 	// drop, Shutdown, ctx cancellation) — not just when the result can no longer be delivered. Without this, an
 	// in-flight invoke_harness (up to 600s: a local model completion or a CLI run) keeps running under the
 	// daemon-lifetime ctx after its stream is gone, the daemon reconnects in about a second, and the platform's
-	// retry lands a SECOND identical multi-minute job on the box while the first is still burning it. runCLI
-	// already SIGKILLs on ctx cancellation and the server-family HTTP calls already honor ctx — only the wiring
-	// from stream lifetime to operation ctx was missing.
+	// retry lands a SECOND identical multi-minute job on the box while the first is still burning it. A CLI
+	// round and the server-family HTTP calls already stop on ctx cancellation — only the wiring from stream lifetime
+	// to operation ctx was missing.
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 	go d.runWriter(stream, sendQueue, sendErrors, done)
@@ -284,7 +323,8 @@ func (d *Daemon) serve(ctx context.Context, stream tunnelpb.TunnelService_Connec
 // concurrent operations (several turns addressing one host at once) never race on the single writer below.
 // operationSemaphore bounds how many run at once (Step 14: "serve the operation loop with a bounded worker pool"),
 // and every wait/send here selects on done so a stream that ended while this operation was still running can never
-// block this goroutine forever or write to an abandoned queue.
+// block this goroutine forever or write to an abandoned queue. A CLI round never takes a pool slot: the CLI session
+// manager admits it, and is the only place that answers harness_busy.
 func (d *Daemon) handleOperation(ctx context.Context, operation *tunnelpb.Operation, sendQueue chan<- *tunnelpb.AgentMessage, done <-chan struct{}) {
 	timeoutSeconds := operationTimeoutSeconds(operation)
 	// The queue wait counts against the operation's OWN deadline, derived here rather than once dispatch runs: a
@@ -293,35 +333,52 @@ func (d *Daemon) handleOperation(ctx context.Context, operation *tunnelpb.Operat
 	operationCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
-	select {
-	case d.operationSemaphore <- struct{}{}:
-	case <-operationCtx.Done():
-		select {
-		case sendQueue <- errorMessage(operation.GetCorrelationId(), errorCodeTimeout,
-			fmt.Sprintf("the operation waited more than %ds for a free slot on this box", timeoutSeconds)):
-		case <-done:
+	if !isCLIRound(operation) {
+		if !d.acquireOperationSlot(operationCtx, operation, timeoutSeconds, sendQueue, done) {
+			return
 		}
-		return
-	case <-done:
-		return
-	}
-	defer func() { <-d.operationSemaphore }()
-
-	// A slot freeing in the same instant the deadline expires leaves both select cases ready, and Go picks one at
-	// random — so re-check before dispatching, or that coin flip starts the command microseconds before killing it.
-	if operationCtx.Err() != nil {
-		select {
-		case sendQueue <- errorMessage(operation.GetCorrelationId(), errorCodeTimeout,
-			fmt.Sprintf("the operation waited more than %ds for a free slot on this box", timeoutSeconds)):
-		case <-done:
-		}
-		return
+		defer func() { <-d.operationSemaphore }()
 	}
 
 	message := d.dispatch(operationCtx, operation)
 
 	select {
 	case sendQueue <- message:
+	case <-done:
+	}
+}
+
+func isCLIRound(operation *tunnelpb.Operation) bool {
+	call, ok := operation.GetCall().(*tunnelpb.Operation_InvokeHarness)
+	return ok && harness.IsCLI(call.InvokeHarness.GetHarness())
+}
+
+// acquireOperationSlot waits for a pool slot and reports whether the operation may run; when it may not, the caller
+// has already been answered (or its stream is gone).
+func (d *Daemon) acquireOperationSlot(operationCtx context.Context, operation *tunnelpb.Operation, timeoutSeconds int, sendQueue chan<- *tunnelpb.AgentMessage, done <-chan struct{}) bool {
+	select {
+	case d.operationSemaphore <- struct{}{}:
+	case <-operationCtx.Done():
+		d.answerNoSlot(operation, timeoutSeconds, sendQueue, done)
+		return false
+	case <-done:
+		return false
+	}
+
+	// A slot freeing in the same instant the deadline expires leaves both select cases ready, and Go picks one at
+	// random — so re-check before dispatching, or that coin flip starts the command microseconds before killing it.
+	if operationCtx.Err() != nil {
+		<-d.operationSemaphore
+		d.answerNoSlot(operation, timeoutSeconds, sendQueue, done)
+		return false
+	}
+	return true
+}
+
+func (d *Daemon) answerNoSlot(operation *tunnelpb.Operation, timeoutSeconds int, sendQueue chan<- *tunnelpb.AgentMessage, done <-chan struct{}) {
+	select {
+	case sendQueue <- errorMessage(operation.GetCorrelationId(), errorCodeTimeout,
+		fmt.Sprintf("the operation waited more than %ds for a free slot on this box", timeoutSeconds)):
 	case <-done:
 	}
 }
@@ -342,6 +399,19 @@ func (d *Daemon) runWriter(stream tunnelpb.TunnelService_ConnectClient, queue <-
 			}
 		case <-done:
 			return
+		}
+	}
+}
+
+func (d *Daemon) runCLISweep(ctx context.Context) {
+	ticker := time.NewTicker(cliSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			d.cliSessions.Sweep(now)
 		}
 	}
 }

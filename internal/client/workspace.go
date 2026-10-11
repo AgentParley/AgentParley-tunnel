@@ -31,7 +31,7 @@ type workspaceBridge struct {
 
 	mu      sync.Mutex
 	send    chan<- *tunnelpb.AgentMessage // the active stream's send queue; nil when disconnected
-	done    <-chan struct{}              // closed when the active stream ends
+	done    <-chan struct{}               // closed when the active stream ends
 	pending map[string]chan *tunnelpb.WorkspaceResult
 	nextID  uint64
 }

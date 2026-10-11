@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/agentparley/tunnel/internal/cliround"
 	"github.com/agentparley/tunnel/internal/files"
 	"github.com/agentparley/tunnel/internal/harness"
 	tunnelpb "github.com/agentparley/tunnel/internal/proto"
@@ -30,9 +31,19 @@ const (
 	errorCodeTooLarge           = "too_large"
 	errorCodeInvalidRequest     = "invalid_request"
 	errorCodeHarnessUnavailable = "harness_unavailable"
+
+	errorCodeSuperseded            = "superseded"
+	errorCodeHarnessBusy           = "harness_busy"
+	errorCodeHarnessSignedOut      = "harness_signed_out"
+	errorCodeHarnessUsageLimit     = "harness_usage_limit"
+	errorCodeHarnessUpdateRequired = "harness_update_required"
+	errorCodeHarnessContextFull    = "harness_context_full"
+	errorCodeHarnessFailed         = "harness_failed"
 )
 
-// Mirrors AgentParley.Cloud.Domain/Ssh/SshEgressLimits.cs's HarnessInvokeTimeoutSeconds.
+// Mirrors backend/Libs/Ssh/Default/SshEgressLimits.cs's HarnessInvokeTimeoutSeconds. A CLI round's deadline is
+// SshEgressLimits.CliRoundTimeoutSeconds (780: one model step plus a bounded rebuild); it arrives as
+// operation.TimeoutSeconds, so this default only applies to the server family.
 const defaultHarnessInvokeTimeoutSeconds = 600
 
 // operationTimeoutSeconds mirrors the per-kind default each dispatchXxx below applies to its own
@@ -246,9 +257,9 @@ func (d *Daemon) dispatchDeleteFile(correlationID string, isFreshShell bool, cal
 	}}}
 }
 
-// dispatchInvokeHarness runs one LLM completion against a locally-registered harness. It never touches the
-// session ledger (see the call site's comment) and IsFreshShell stays false — a completion has no shell state to
-// report freshness about.
+// dispatchInvokeHarness runs one LLM completion (or, for the CLI family, one round) against a locally-registered
+// harness. It never touches the shell session ledger (see the call site's comment; the CLI session manager is
+// separate from it) and IsFreshShell stays false — a completion has no shell state to report freshness about.
 func (d *Daemon) dispatchInvokeHarness(ctx context.Context, correlationID string, operation *tunnelpb.Operation, call *tunnelpb.InvokeHarnessCall) *tunnelpb.AgentMessage {
 	timeoutSeconds := int(operation.GetTimeoutSeconds())
 	if timeoutSeconds <= 0 {
@@ -258,17 +269,17 @@ func (d *Daemon) dispatchInvokeHarness(ctx context.Context, correlationID string
 	invokeCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
-	resolvedHarness, err := harness.Resolve(call.GetHarness(), d.tunnelConfig)
+	resolvedHarness, err := harness.Resolve(call.GetHarness(), d.tunnelConfig, harness.CLIDeps{Sessions: d.cliSessions, Pins: d.pins, Drivers: d.cliDrivers})
 	if err != nil {
 		return errorMessage(correlationID, errorCodeHarnessUnavailable, err.Error())
 	}
 
 	outcome, err := resolvedHarness.Invoke(invokeCtx, call.GetModel(), call.GetPayload())
 	if err != nil {
-		if invokeCtx.Err() == context.DeadlineExceeded {
-			return errorMessage(correlationID, errorCodeTimeout, fmt.Sprintf("the local model did not answer within %ds", timeoutSeconds))
+		if errors.Is(err, cliround.ErrUpdateRequired) {
+			d.pins.RefreshNow()
 		}
-		return errorMessage(correlationID, errorCodeHarnessUnavailable, err.Error())
+		return harnessErrorMessage(invokeCtx, correlationID, timeoutSeconds, err)
 	}
 
 	return &tunnelpb.AgentMessage{Kind: &tunnelpb.AgentMessage_Result{Result: &tunnelpb.OperationResult{
@@ -280,6 +291,36 @@ func (d *Daemon) dispatchInvokeHarness(ctx context.Context, correlationID string
 			ErrorOutput: outcome.ErrorOutput,
 		}},
 	}}}
+}
+
+// harnessErrorMessage turns an Invoke failure into the OperationError code SshEgressErrorCodes.cs names for it.
+func harnessErrorMessage(invokeCtx context.Context, correlationID string, timeoutSeconds int, err error) *tunnelpb.AgentMessage {
+	var harnessErr *cliround.HarnessError
+	var invalidRequestErr *cliround.InvalidRequestError
+	switch {
+	case errors.Is(err, cliround.ErrSuperseded):
+		return errorMessage(correlationID, errorCodeSuperseded, err.Error())
+	case errors.Is(err, cliround.ErrBusy):
+		return errorMessage(correlationID, errorCodeHarnessBusy, err.Error())
+	case errors.Is(err, cliround.ErrSignedOut):
+		return errorMessage(correlationID, errorCodeHarnessSignedOut, err.Error())
+	case errors.Is(err, cliround.ErrUsageLimit):
+		return errorMessage(correlationID, errorCodeHarnessUsageLimit, err.Error())
+	case errors.Is(err, cliround.ErrUpdateRequired):
+		return errorMessage(correlationID, errorCodeHarnessUpdateRequired, err.Error())
+	case errors.Is(err, cliround.ErrContextFull):
+		return errorMessage(correlationID, errorCodeHarnessContextFull, err.Error())
+	case errors.Is(err, cliround.ErrPayloadTooLarge):
+		return errorMessage(correlationID, errorCodeTooLarge, err.Error())
+	case errors.As(err, &invalidRequestErr):
+		return errorMessage(correlationID, errorCodeInvalidRequest, err.Error())
+	case errors.Is(err, context.DeadlineExceeded) || invokeCtx.Err() == context.DeadlineExceeded:
+		return errorMessage(correlationID, errorCodeTimeout, fmt.Sprintf("the local model did not answer within %ds", timeoutSeconds))
+	case errors.As(err, &harnessErr):
+		return errorMessage(correlationID, errorCodeHarnessFailed, err.Error())
+	default:
+		return errorMessage(correlationID, errorCodeHarnessUnavailable, err.Error())
+	}
 }
 
 func errorMessage(correlationID, code, message string) *tunnelpb.AgentMessage {

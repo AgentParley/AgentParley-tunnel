@@ -920,8 +920,10 @@ func (x *DeleteFileCall) GetPath() string {
 }
 
 // The daemon resolves `harness` from its OWN local config/defaults only — the platform never sends a URL, path,
-// flag, or argv fragment (no SSRF/exec pivot). An invocation MUST be side-effect-free on the box: CLI harnesses
-// are always run pinned to non-agentic, tool-free modes by the daemon's fixed argv, never the box's local config.
+// flag or argv fragment. For the server family `payload` is an OpenAI Chat Completions body the daemon forwards
+// unread. For the CLI family (`codex`, `claude`) `payload` is a round request (see the daemon's internal/cliround)
+// the daemon interprets: it keeps a warm CLI session per conversation, and the CLI only ever sees the tools the
+// request lists.
 type InvokeHarnessCall struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Harness       string                 `protobuf:"bytes,1,opt,name=harness,proto3" json:"harness,omitempty"`
@@ -1488,9 +1490,8 @@ func (*DeleteFileResult) Descriptor() ([]byte, []int) {
 	return file_tunnel_proto_rawDescGZIP(), []int{19}
 }
 
-// status_code is the local HTTP status (server family) or process exit code (CLI family) — NOT a uniform
-// "0 is good" convention across families; payload is stdout / response body verbatim — the daemon never
-// interprets it, C# owns all interpretation.
+// CLI family: status_code 0 and payload is a round result JSON; failures are OperationError codes. Server family:
+// unchanged — status_code is the local HTTP status, payload the response body verbatim.
 type InvokeHarnessResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       string                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -2177,7 +2178,7 @@ func (x *WorkspaceCommitted) GetSizeBytes() int64 {
 
 // codes: unknown_host | no_agent | agent_not_found | session_not_found | invalid_path | file_not_found |
 //
-//	too_large | storage_limit | conflict | upload_invalid | not_connected | timeout | internal
+//	too_large | storage_limit | conflict | upload_invalid | not_connected | timeout | busy | internal
 type WorkspaceCallError struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Code          string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
