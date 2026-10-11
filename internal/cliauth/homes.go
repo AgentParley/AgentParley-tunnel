@@ -15,9 +15,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/agentparley/tunnel/internal/atomicfile"
 	"github.com/agentparley/tunnel/internal/cliround"
 	"github.com/agentparley/tunnel/internal/credstore"
-	"github.com/agentparley/tunnel/internal/managedcli"
 	"github.com/agentparley/tunnel/internal/sessions"
 )
 
@@ -146,7 +146,7 @@ func SeedClaudeConfig(pinnedVersion string) error {
 	if err != nil {
 		return err
 	}
-	return managedcli.WriteFileAtomic(configPath, encoded)
+	return atomicfile.Write(configPath, encoded)
 }
 
 // ClaudeToken returns the long-lived Claude Code login token stored at register time.

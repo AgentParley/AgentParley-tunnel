@@ -15,7 +15,7 @@ type Json = Record<string, any>
 let bridge = ''
 let isStopped = false
 let failingSince: number | null = null
-const ranSeqs = new Set<number>()
+const ranSequences = new Set<number>()
 const promptText = { system: '', toolNote: '' }
 const completeParts = new Map<string, string>()
 
@@ -114,11 +114,11 @@ async function tick($: any): Promise<void> {
     const reply = await send($, 'GET', '/next?wait=' + POLL_SECONDS)
     if (reply.status === 200) {
       const command: Json = JSON.parse(reply.text)
-      if (!ranSeqs.has(command.seq)) {
+      if (!ranSequences.has(command.sequence)) {
         await runCommand($, command)
-        ranSeqs.add(command.seq)
+        ranSequences.add(command.sequence)
       }
-      await post($, '/ack', { seq: command.seq })
+      await post($, '/ack', { sequence: command.sequence })
     } else if (reply.status !== 204) {
       await $.clock.sleep(1000)
     }
@@ -166,7 +166,7 @@ export const register: Register = on => {
     bridge = (await $.env.get('AGENTPARLEY_BRIDGE')) ?? ''
     isStopped = false
     failingSince = null
-    ranSeqs.clear()
+    ranSequences.clear()
     const version = (await $.session.version()).version
     const before = (await $.tool.list()).map(t => t.name)
     const hello = await post($, '/hello', { engineVersion: version, toolsBefore: before })

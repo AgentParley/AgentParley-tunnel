@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentparley/tunnel/internal/atomicfile"
 	"github.com/agentparley/tunnel/internal/config"
 )
 
@@ -145,9 +146,9 @@ func (r *Refresher) refresh(ctx context.Context) {
 	}
 	if err := os.MkdirAll(filepath.Dir(r.pinsPath()), 0o700); err != nil {
 		r.logger.Printf("cli pins: cannot save the pin list: %v", err)
-	} else if err := WriteFileAtomic(r.pinsPath(), body); err != nil {
+	} else if err := atomicfile.Write(r.pinsPath(), body); err != nil {
 		r.logger.Printf("cli pins: cannot save the pin list: %v", err)
-	} else if err := WriteFileAtomic(r.pinsSigPath(), sig); err != nil {
+	} else if err := atomicfile.Write(r.pinsSigPath(), sig); err != nil {
 		r.logger.Printf("cli pins: cannot save the pin list signature: %v", err)
 	}
 	r.current = manifest
@@ -180,27 +181,6 @@ func (r *Refresher) warnOncePerHour(format string, args ...any) {
 	if due {
 		r.logger.Printf(format, args...)
 	}
-}
-
-// WriteFileAtomic replaces path with data (mode 0600) so a reader sees the old file or the new one, never a partial one.
-func WriteFileAtomic(path string, data []byte) error {
-	temp, err := os.CreateTemp(filepath.Dir(path), ".atomic-*.tmp")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tempPath, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tempPath, path)
 }
 
 // NewFixedRefresher serves one manifest and never fetches: `doctor --pins` uses it to try a candidate pin list.

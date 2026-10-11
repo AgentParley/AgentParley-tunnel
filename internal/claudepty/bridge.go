@@ -34,7 +34,7 @@ var toleratedTools = map[string]bool{"ToolSearch": true}
 
 // command is one instruction the mod picks up from GET /next.
 type command struct {
-	Seq       int64  `json:"seq"`
+	Sequence  int64  `json:"sequence"`
 	Kind      string `json:"kind"`
 	Text      string `json:"text,omitempty"`
 	ID        string `json:"id,omitempty"`
@@ -342,19 +342,19 @@ func (b *bridge) unackedCommand() *command {
 
 func (b *bridge) handleAck(writer http.ResponseWriter, request *http.Request) {
 	var body struct {
-		Seq int64 `json:"seq"`
+		Sequence int64 `json:"sequence"`
 	}
 	if err := decode(request, &body); err != nil {
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
 	b.mutex.Lock()
-	if b.unacked != nil && b.unacked.Seq == body.Seq {
+	if b.unacked != nil && b.unacked.Sequence == body.Sequence {
 		b.unacked = nil
 	}
-	if waiter := b.ackWaiters[body.Seq]; waiter != nil {
+	if waiter := b.ackWaiters[body.Sequence]; waiter != nil {
 		close(waiter)
-		delete(b.ackWaiters, body.Seq)
+		delete(b.ackWaiters, body.Sequence)
 	}
 	b.mutex.Unlock()
 	writeJSON(writer, http.StatusOK, map[string]bool{"ok": true})
@@ -496,35 +496,35 @@ func (b *bridge) send(ctx context.Context, next command) error {
 func (b *bridge) enqueue(ctx context.Context, next command, wantAck bool) (int64, <-chan struct{}, error) {
 	b.mutex.Lock()
 	b.sequence++
-	next.Seq = b.sequence
+	next.Sequence = b.sequence
 	var acknowledged chan struct{}
 	if wantAck {
 		acknowledged = make(chan struct{})
-		b.ackWaiters[next.Seq] = acknowledged
+		b.ackWaiters[next.Sequence] = acknowledged
 	}
 	b.mutex.Unlock()
 	select {
 	case b.commands <- next:
-		return next.Seq, acknowledged, nil
+		return next.Sequence, acknowledged, nil
 	case <-ctx.Done():
-		b.forgetAck(next.Seq)
+		b.forgetAck(next.Sequence)
 		return 0, nil, context.Cause(ctx)
 	}
 }
 
-func (b *bridge) forgetAck(seq int64) {
+func (b *bridge) forgetAck(sequence int64) {
 	b.mutex.Lock()
-	delete(b.ackWaiters, seq)
+	delete(b.ackWaiters, sequence)
 	b.mutex.Unlock()
 }
 
 // sendAcknowledged queues a command and waits for the mod's /ack.
 func (b *bridge) sendAcknowledged(ctx context.Context, next command, exited <-chan struct{}) error {
-	seq, acknowledged, err := b.enqueue(ctx, next, true)
+	sequence, acknowledged, err := b.enqueue(ctx, next, true)
 	if err != nil {
 		return err
 	}
-	defer b.forgetAck(seq)
+	defer b.forgetAck(sequence)
 	select {
 	case <-acknowledged:
 		return nil
