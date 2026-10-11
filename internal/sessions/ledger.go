@@ -183,6 +183,11 @@ func stateRoot(homeDir string) string {
 	return filepath.Join(homeDir, ".agentparley")
 }
 
+// StateRoot exposes the tmpfs-first root for other packages that need scratch space with the same 0700 guarantee.
+func StateRoot(homeDir string) string {
+	return stateRoot(homeDir)
+}
+
 // WorkspaceSocketPath is the fixed unix socket the daemon serves for the `agentparley ws` bridge and injects as
 // AGENTPARLEY_WS_SOCKET into every run-command's environment. It sits under the same tmpfs-first state root as the
 // session shell state, so the daemon (serving it) and a `ws` child (or a human shell falling back to this path)

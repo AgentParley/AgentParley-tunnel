@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/agentparley/tunnel/internal/config"
+	"github.com/agentparley/tunnel/internal/managedcli"
 	"github.com/agentparley/tunnel/internal/version"
 )
 
@@ -133,9 +134,10 @@ func applyUpdate(updateServer, latestVersion string) error {
 		return fmt.Errorf("downloading %s: %w", binaryURL, err)
 	}
 
-	expectedChecksum, err := downloadChecksum(ctx, binaryURL+".sha256")
+	expectedChecksum, err := downloadSignedChecksum(ctx, binaryURL+".sha256")
 	if err != nil {
-		return fmt.Errorf("downloading %s.sha256: %w", binaryURL, err)
+		log.Printf("update: REFUSING to install %s: %v", latestVersion, err)
+		return fmt.Errorf("verifying %s.sha256: %w", binaryURL, err)
 	}
 
 	actualChecksum := sha256.Sum256(binaryBytes)
@@ -174,11 +176,20 @@ func downloadFile(ctx context.Context, url string) ([]byte, error) {
 	return io.ReadAll(response.Body)
 }
 
-// downloadChecksum extracts the hex digest from a sha256sum-format sidecar ("<hex>  <filename>").
-func downloadChecksum(ctx context.Context, url string) (string, error) {
+// downloadSignedChecksum fetches the sha256sum-format sidecar ("<hex>  <filename>") and its .sig, checks the release
+// key signed exactly those bytes, and returns the hex digest. An unsigned or wrongly signed release is refused: the
+// checksum alone only proves the download matches a file anyone who can write to the bucket could have replaced.
+func downloadSignedChecksum(ctx context.Context, url string) (string, error) {
 	body, err := downloadFile(ctx, url)
 	if err != nil {
 		return "", err
+	}
+	signature, err := downloadFile(ctx, url+".sig")
+	if err != nil {
+		return "", fmt.Errorf("no release signature at %s.sig: %w", url, err)
+	}
+	if err := managedcli.VerifySignature(body, signature); err != nil {
+		return "", fmt.Errorf("release signature check failed: %w", err)
 	}
 	fields := strings.Fields(string(body))
 	if len(fields) == 0 {

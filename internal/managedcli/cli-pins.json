@@ -1,0 +1,36 @@
+{
+  "serial": 1,
+  "issuedAt": "2026-10-11T00:00:00Z",
+  "harnesses": {
+    "codex": {
+      "version": "0.150.1",
+      "assets": {
+        "linux/amd64": {
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.150.1/codex-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "ab308870bc7fc048c23dc49d03f6b8af9ce7fc99b9da882d6688be7a90155c7a",
+          "archiveMember": "codex-x86_64-unknown-linux-musl"
+        },
+        "linux/arm64": {
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.150.1/codex-aarch64-unknown-linux-musl.tar.gz",
+          "sha256": "5bb1f75e1a1588845b4a31f2c98fb2b394be5c2a8d90a24a8ab0ebbae1169264",
+          "archiveMember": "codex-aarch64-unknown-linux-musl"
+        }
+      }
+    },
+    "claude": {
+      "version": "2.1.296",
+      "assets": {
+        "linux/amd64": {
+          "url": "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/2.1.296/linux-x64/claude",
+          "sha256": "24972e3bc859fab2b46ed4c1e51f7d6130f06d3bd550811a114640de3370d0de",
+          "archiveMember": ""
+        },
+        "linux/arm64": {
+          "url": "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/2.1.296/linux-arm64/claude",
+          "sha256": "f1f6e96e0d8342b9dbf41d7e88255397a6a52ce3d8736ad6a4c6b59c9b62fefa",
+          "archiveMember": ""
+        }
+      }
+    }
+  }
+}

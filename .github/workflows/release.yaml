@@ -37,6 +37,8 @@ jobs:
           go-version: "1.26.5"
 
       - name: build
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           VERSION="${GITHUB_REF_NAME#tunnel-v}"
           echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
@@ -53,6 +55,9 @@ jobs:
           # Sidecar checksums install.sh and the daemon's update both verify the download against. Written from
           # inside dist/ so each line carries the bare filename, which is what `sha256sum -c` expects.
           cd dist && for f in agentparley-linux-amd64 agentparley-linux-arm64; do sha256sum "$f" > "$f.sha256"; done && cd ..
+          # The daemon's update installs a binary only when its checksum file carries a valid Ed25519 signature by the
+          # release key, so a replaced bucket object alone cannot push code to the fleet.
+          for f in agentparley-linux-amd64 agentparley-linux-arm64; do go run ./cmd/clipins sign "dist/$f.sha256"; done
           echo "$VERSION" > dist/latest-version
 
       - uses: aws-actions/configure-aws-credentials@v4

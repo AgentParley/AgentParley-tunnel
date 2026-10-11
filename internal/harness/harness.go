@@ -13,7 +13,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/agentparley/tunnel/internal/cliround"
 	"github.com/agentparley/tunnel/internal/config"
+	"github.com/agentparley/tunnel/internal/managedcli"
 )
 
 // These names are the wire vocabulary shared with AgentParley.Cloud.Domain's TunnelHarnessNames and the proto's
@@ -65,7 +67,10 @@ type Harness interface {
 // per invoke (dispatch.go) as well as by `register`, so it re-reads the discovery file on every call — a small
 // local file read, cheap enough to skip caching — merging whatever `register` found in under whatever config.yaml
 // already says (config always wins; see withDiscoveredURL and the CLI constructors).
-func Resolve(harnessName string, tunnelConfig *config.Config) (Harness, error) {
+//
+// cliSessions and pins are the daemon's warm CLI sessions and managed CLI builds. A caller outside the running
+// daemon (register, doctor) passes nil for both; the CLI harnesses do not use them yet.
+func Resolve(harnessName string, tunnelConfig *config.Config, cliSessions *cliround.Manager, pins *managedcli.Refresher) (Harness, error) {
 	harnessConfig := tunnelConfig.Harnesses[harnessName]
 	discoveries, err := loadDiscoveries()
 	if err != nil {

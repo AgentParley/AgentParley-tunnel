@@ -14,8 +14,11 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/agentparley/tunnel/internal/cliround"
 	"github.com/agentparley/tunnel/internal/config"
 	"github.com/agentparley/tunnel/internal/credstore"
+	"github.com/agentparley/tunnel/internal/harness"
+	"github.com/agentparley/tunnel/internal/managedcli"
 	"github.com/agentparley/tunnel/internal/policy"
 	tunnelpb "github.com/agentparley/tunnel/internal/proto"
 	"github.com/agentparley/tunnel/internal/sessions"
@@ -51,21 +54,29 @@ const (
 	sendQueueDepth        = 32
 	receivedQueueDepth    = 1
 	sessionStateTTL       = 72 * time.Hour // SshEgressLimits.SessionStateTtlHours
+	cliSweepInterval      = 30 * time.Second
+	maxGrpcMessageBytes   = 16 << 20 // SshEgress raises the same limits: a CLI round carries a whole history
 )
 
+var defaultMaxWarmSessions = map[string]int{harness.Claude: 8, harness.Codex: 32}
+
+const defaultWarmIdleMinutes = 30
+
 type Daemon struct {
-	apiBaseURL         string
-	egressAddress      string
-	allowInsecure      bool
-	store              credstore.Store
-	tunnelConfig       *config.Config
-	policy             *policy.Policy
-	ledger             *sessions.Ledger
-	runAsUser          *shellrun.User
-	logger             *log.Logger
-	operationSemaphore chan struct{}
+	apiBaseURL          string
+	egressAddress       string
+	allowInsecure       bool
+	store               credstore.Store
+	tunnelConfig        *config.Config
+	policy              *policy.Policy
+	ledger              *sessions.Ledger
+	runAsUser           *shellrun.User
+	logger              *log.Logger
+	operationSemaphore  chan struct{}
 	workspaceSocketPath string
 	workspaceBridge     *workspaceBridge
+	cliSessions         *cliround.Manager
+	pins                *managedcli.Refresher
 }
 
 func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.Store, tunnelConfig *config.Config, runAsUser *shellrun.User) *Daemon {
@@ -76,20 +87,42 @@ func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.S
 
 	workspaceSocketPath := sessions.WorkspaceSocketPath(runAsUser.Home)
 
+	pins := managedcli.NewRefresher(credstore.StateDir(), log.Default())
+	pins.SetUpdateServer(tunnelConfig.UpdateServer)
+
 	return &Daemon{
-		apiBaseURL:         apiBaseURL,
-		egressAddress:      egressAddress,
-		allowInsecure:      allowInsecure,
-		store:              store,
-		tunnelConfig:       tunnelConfig,
-		policy:             policy.New(tunnelConfig),
-		ledger:             sessions.NewLedger(),
-		runAsUser:          runAsUser,
-		logger:             log.Default(),
-		operationSemaphore: make(chan struct{}, maxConcurrentOperations),
+		apiBaseURL:          apiBaseURL,
+		egressAddress:       egressAddress,
+		allowInsecure:       allowInsecure,
+		store:               store,
+		tunnelConfig:        tunnelConfig,
+		policy:              policy.New(tunnelConfig),
+		ledger:              sessions.NewLedger(),
+		runAsUser:           runAsUser,
+		logger:              log.Default(),
+		operationSemaphore:  make(chan struct{}, maxConcurrentOperations),
 		workspaceSocketPath: workspaceSocketPath,
 		workspaceBridge:     newWorkspaceBridge(workspaceSocketPath, log.Default()),
+		cliSessions:         cliround.NewManager(cliLimits(tunnelConfig), log.Default()),
+		pins:                pins,
 	}
+}
+
+func cliLimits(tunnelConfig *config.Config) map[string]cliround.Limits {
+	limits := map[string]cliround.Limits{}
+	for harnessName, defaultMax := range defaultMaxWarmSessions {
+		harnessConfig := tunnelConfig.Harnesses[harnessName]
+		maxWarm := harnessConfig.MaxWarmSessions
+		if maxWarm == 0 {
+			maxWarm = defaultMax
+		}
+		idleMinutes := harnessConfig.WarmIdleMinutes
+		if idleMinutes == 0 {
+			idleMinutes = defaultWarmIdleMinutes
+		}
+		limits[harnessName] = cliround.Limits{MaxWarm: maxWarm, IdleLimit: time.Duration(idleMinutes) * time.Minute}
+	}
+	return limits
 }
 
 // Run blocks until ctx is cancelled (a clean SIGTERM shutdown) or a terminal rejection ends the loop.
@@ -108,6 +141,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 
+	defer d.cliSessions.Close()
+	managedcli.PruneOldVersions(d.pins.Current())
+	go d.pins.Run(ctx)
+	go d.runCliSweep(ctx)
 	go d.runLedgerSweep(ctx)
 	go d.workspaceBridge.serveSocket(ctx)
 
@@ -177,6 +214,7 @@ func (d *Daemon) connectOnce(ctx context.Context, creds *credstore.Credentials, 
 			Timeout:             keepAliveTimeout,
 			PermitWithoutStream: true,
 		}),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxGrpcMessageBytes), grpc.MaxCallSendMsgSize(maxGrpcMessageBytes)),
 	)
 	if err != nil {
 		return fmt.Errorf("dialing the egress service: %w", err)
@@ -342,6 +380,19 @@ func (d *Daemon) runWriter(stream tunnelpb.TunnelService_ConnectClient, queue <-
 			}
 		case <-done:
 			return
+		}
+	}
+}
+
+func (d *Daemon) runCliSweep(ctx context.Context) {
+	ticker := time.NewTicker(cliSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			d.cliSessions.Sweep(now)
 		}
 	}
 }

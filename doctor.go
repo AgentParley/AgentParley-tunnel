@@ -296,7 +296,7 @@ func doctorProviders(tunnelConfig *config.Config, configErr error, runAsUser *sh
 			continue
 		}
 
-		resolvedHarness, err := harness.Resolve(name, tunnelConfig)
+		resolvedHarness, err := harness.Resolve(name, tunnelConfig, nil, nil)
 		if err != nil {
 			anyFailed = true
 			printCheck("✗", name, err.Error())
