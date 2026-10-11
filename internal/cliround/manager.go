@@ -322,28 +322,36 @@ func (m *Manager) planRound(current *entry, frame Frame, request *Request) round
 	return roundState{runner: runner, plan: plan, reason: RebuildNone}
 }
 
-// runSteps extends the warm runner or rebuilds one, and rebuilds once more when the CLI's context fills up.
+// runSteps extends the warm runner or rebuilds one, and rebuilds once more when the CLI's context fills up or the
+// session was disturbed after the round was planned.
 func (m *Manager) runSteps(roundCtx context.Context, harness, model string, request *Request, factory Factory, current *entry, state *roundState) (*Result, error) {
 	limits := m.limitsFor(harness)
-	contextFullRetried := false
+	isRebuiltOnce := false
 	for {
 		budgets, err := budgetsFor(roundCtx)
 		if err != nil {
 			return nil, err
 		}
 		var result *Result
-		if state.runner != nil {
+		wasWarm := state.runner != nil
+		if wasWarm {
 			result, err = m.extend(roundCtx, state.runner, state.plan, request, budgets.Step)
 		} else {
 			state.runner, result, err = m.rebuild(roundCtx, limits, current, model, request, factory, budgets, state.holdsSlot)
 			state.holdsSlot = false
 		}
-		if errors.Is(err, ErrContextFull) && !contextFullRetried {
-			contextFullRetried = true
+		isContextFull := errors.Is(err, ErrContextFull)
+		isDisturbed := wasWarm && errors.Is(err, ErrSessionDirty)
+		if (isContextFull || isDisturbed) && !isRebuiltOnce {
+			isRebuiltOnce = true
 			state.holdsSlot = m.replaceRunner(current)
 			state.runner = nil
-			state.reason = RebuildContextFull
-			state.contextFullEvents = append(state.contextFullEvents, Event{Kind: EventContextFull, Detail: "the CLI's context filled up, so the session was rebuilt"})
+			if isContextFull {
+				state.reason = RebuildContextFull
+				state.contextFullEvents = append(state.contextFullEvents, Event{Kind: EventContextFull, Detail: "the CLI's context filled up, so the session was rebuilt"})
+			} else {
+				state.reason = RebuildDirty
+			}
 			continue
 		}
 		return result, err
@@ -436,7 +444,8 @@ func (m *Manager) rebuild(ctx context.Context, limits Limits, current *entry, mo
 
 	m.mutex.Lock()
 	current.table.reserved--
-	if err == nil && runner != nil {
+	isDiscarded := m.closed
+	if err == nil && runner != nil && !isDiscarded {
 		current.runner = runner
 		current.table.live++
 	} else {
@@ -444,9 +453,12 @@ func (m *Manager) rebuild(ctx context.Context, limits Limits, current *entry, mo
 	}
 	m.mutex.Unlock()
 
-	if err != nil {
+	if err != nil || (isDiscarded && runner != nil) {
 		if runner != nil {
 			_, _ = runner.Close()
+		}
+		if err == nil {
+			err = errShuttingDown
 		}
 		return nil, nil, err
 	}

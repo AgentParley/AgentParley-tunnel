@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,8 +41,6 @@ const (
 	placeholderBuiltin = "Read"
 )
 
-var modelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._\-\[\]]{0,63}$`)
-
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\r`)
 
 // Driver starts Claude Code processes and owns the shared one-shot process.
@@ -49,12 +48,11 @@ type Driver struct {
 	manifest func() managedcli.Manifest
 	logger   *log.Logger
 
-	// baseURL and stubToken point processes at a local stand-in for the API with a made-up login. Only the replay
-	// benchmark (`doctor --bench-claude-replay`) sets them, so it can run without a login or a model call.
-	baseURL   string
-	stubToken string
-	// benchmark answers the step after the replayed window with a finished turn instead of a real model request.
-	benchmark bool
+	// The three injection points default to the real login, the real environment and real model steps; the replay
+	// benchmark replaces them through DriverOptions (bench.go).
+	token            func() (string, error)
+	extraEnvironment []string
+	decideStep       func() stepDecision
 
 	counter atomic.Int64
 
@@ -62,8 +60,20 @@ type Driver struct {
 	utility      *utility
 }
 
-func NewDriver(manifest func() managedcli.Manifest, logger *log.Logger) *Driver {
-	return &Driver{manifest: manifest, logger: logger}
+// DriverOption changes how a Driver launches Claude Code or answers its model steps.
+type DriverOption func(*Driver)
+
+func NewDriver(manifest func() managedcli.Manifest, logger *log.Logger, options ...DriverOption) *Driver {
+	driver := &Driver{
+		manifest:   manifest,
+		logger:     logger,
+		token:      cliauth.ClaudeToken,
+		decideStep: func() stepDecision { return stepDecision{Mode: stepModeReal} },
+	}
+	for _, option := range options {
+		option(driver)
+	}
+	return driver
 }
 
 // Shutdown ends the one-shot process, if one was started.
@@ -130,9 +140,6 @@ type process struct {
 }
 
 func (d *Driver) startProcess(ctx context.Context, spec processSpec) (*process, error) {
-	if !modelPattern.MatchString(spec.model) {
-		return nil, &cliround.InvalidRequestError{Message: fmt.Sprintf("model %q is not a valid claude model id", spec.model)}
-	}
 	binary, version, err := managedcli.Ensure(ctx, d.manifest(), "claude")
 	if err != nil {
 		return nil, err
@@ -141,12 +148,9 @@ func (d *Driver) startProcess(ctx context.Context, spec processSpec) (*process, 
 	if err != nil {
 		return nil, err
 	}
-	token := d.stubToken
-	if token == "" {
-		token, err = cliauth.ClaudeToken()
-		if err != nil {
-			return nil, err
-		}
+	token, err := d.token()
+	if err != nil {
+		return nil, err
 	}
 	if err := cliauth.SeedClaudeConfig(version); err != nil {
 		return nil, fmt.Errorf("preparing the Claude Code configuration: %w", err)
@@ -163,12 +167,16 @@ func (d *Driver) startProcess(ctx context.Context, spec processSpec) (*process, 
 	command.Env = d.environment(token, socketPath)
 
 	screen := &ringBuffer{}
-	ptmx, err := pty.StartWithSize(command, &pty.Winsize{Rows: screenRows, Cols: screenColumns})
-	if err != nil {
+	exited := make(chan struct{})
+	launched := make(chan launchResult, 1)
+	go launch(command, launched, exited)
+	result := <-launched
+	if result.err != nil {
 		running.close()
-		return nil, fmt.Errorf("starting Claude Code: %w", err)
+		return nil, fmt.Errorf("starting Claude Code: %w", result.err)
 	}
-	started := &process{command: command, ptmx: ptmx, screen: screen, bridge: running, version: version, exited: make(chan struct{})}
+	ptmx := result.ptmx
+	started := &process{command: command, ptmx: ptmx, screen: screen, bridge: running, version: version, exited: exited}
 	go func() {
 		buffer := make([]byte, 8192)
 		for {
@@ -181,16 +189,32 @@ func (d *Driver) startProcess(ctx context.Context, spec processSpec) (*process, 
 			}
 		}
 	}()
-	go func() {
-		_ = command.Wait()
-		close(started.exited)
-	}()
 
 	if err := started.awaitReady(ctx); err != nil {
 		started.close()
 		return nil, err
 	}
 	return started, nil
+}
+
+type launchResult struct {
+	ptmx *os.File
+	err  error
+}
+
+// launch starts Claude Code in its own session with a terminal and waits for it, closing exited when it is gone.
+// Pdeathsig is tied to the OS thread that forked, so this goroutine pins its thread and holds it until the process has
+// exited; a thread the Go runtime retired earlier would send SIGKILL to a live Claude Code.
+func launch(command *exec.Cmd, launched chan<- launchResult, exited chan<- struct{}) {
+	runtime.LockOSThread()
+	defer close(exited)
+	attributes := &syscall.SysProcAttr{Setsid: true, Setctty: true, Pdeathsig: syscall.SIGKILL}
+	ptmx, err := pty.StartWithAttrs(command, &pty.Winsize{Rows: screenRows, Cols: screenColumns}, attributes)
+	launched <- launchResult{ptmx: ptmx, err: err}
+	if err != nil {
+		return
+	}
+	_ = command.Wait()
 }
 
 // claudeArgs is the fixed argv of every Claude Code the daemon starts. The wire only ever names a model and an effort.
@@ -223,10 +247,7 @@ func (d *Driver) environment(token, socketPath string) []string {
 		"DISABLE_AUTO_COMPACT=1",
 		"MAX_MCP_OUTPUT_TOKENS=200000",
 	}
-	if d.baseURL != "" {
-		environment = append(environment, "ANTHROPIC_BASE_URL="+d.baseURL)
-	}
-	return environment
+	return append(environment, d.extraEnvironment...)
 }
 
 func homeDirectory() string {

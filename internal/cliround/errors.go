@@ -11,6 +11,7 @@ var (
 	ErrUsageLimit     = errors.New("the CLI account has hit its usage limit")
 	ErrUpdateRequired = errors.New("the CLI vendor requires a newer CLI build")
 	ErrContextFull    = errors.New("the CLI's context window is full")
+	ErrSessionDirty   = errors.New("the CLI session was disturbed between planning and running the round")
 
 	ErrPayloadTooLarge = errors.New("the round request is too large")
 )

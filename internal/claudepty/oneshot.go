@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/agentparley/tunnel/internal/cliround"
+	"github.com/agentparley/tunnel/internal/managedcli"
 )
 
 const (
@@ -27,6 +28,11 @@ type utility struct {
 	process *process
 	driver  *Driver
 
+	// holds counts the calls using the process and isRetired marks one that is no longer the shared process; both
+	// are guarded by the driver's utilityMutex.
+	holds     int
+	isRetired bool
+
 	partsMutex sync.Mutex
 	timer      *time.Timer
 	sequence   int
@@ -35,7 +41,7 @@ type utility struct {
 type utilitySink struct{}
 
 func (utilitySink) onStepStart(string, int) stepDecision {
-	return stepDecision{Mode: "made-up", StopReason: "end_turn"}
+	return stepDecision{Mode: stepModeMadeUp, StopReason: stopReasonEndTurn}
 }
 func (utilitySink) onStepEnd(stepReport)      {}
 func (utilitySink) onTurnComplete(turnReport) {}
@@ -48,26 +54,51 @@ func (u *utility) close() {
 	u.process.close()
 }
 
+// utilityFor returns the shared process with a hold on it; the caller gives the hold back with releaseUtility. A
+// process replaced by a version change, or dropped for idleness, closes once its last hold is released.
 func (d *Driver) utilityFor(ctx context.Context, model string) (*utility, error) {
+	if _, _, err := managedcli.Ensure(ctx, d.manifest(), "claude"); err != nil {
+		return nil, err
+	}
+
+	var stale *utility
+	defer func() {
+		if stale != nil {
+			stale.close()
+		}
+	}()
 	d.utilityMutex.Lock()
 	defer d.utilityMutex.Unlock()
-	pinned := d.manifest().Version("claude")
-	if d.utility != nil && d.utility.process.alive() && d.utility.process.version == pinned {
-		d.utility.timer.Reset(utilityIdleLimit)
-		return d.utility, nil
-	}
-	if d.utility != nil {
-		d.utility.close()
+	if current := d.utility; current != nil {
+		pinned := d.manifest().Version("claude")
+		if current.process.alive() && current.process.version == pinned && current.timer.Reset(utilityIdleLimit) {
+			current.holds++
+			return current, nil
+		}
 		d.utility = nil
+		current.isRetired = true
+		if current.holds == 0 {
+			stale = current
+		}
 	}
 	running, err := d.startProcess(ctx, processSpec{model: model, hello: hello{Tools: []toolSpec{}}, sink: utilitySink{}})
 	if err != nil {
 		return nil, err
 	}
-	created := &utility{process: running, driver: d}
+	created := &utility{process: running, driver: d, holds: 1}
 	created.timer = time.AfterFunc(utilityIdleLimit, func() { d.dropUtility(created) })
 	d.utility = created
 	return created, nil
+}
+
+func (d *Driver) releaseUtility(target *utility) {
+	d.utilityMutex.Lock()
+	target.holds--
+	isDone := target.isRetired && target.holds == 0
+	d.utilityMutex.Unlock()
+	if isDone {
+		target.close()
+	}
 }
 
 func (d *Driver) dropUtility(target *utility) {
@@ -75,8 +106,12 @@ func (d *Driver) dropUtility(target *utility) {
 	if d.utility == target {
 		d.utility = nil
 	}
+	target.isRetired = true
+	isDone := target.holds == 0
 	d.utilityMutex.Unlock()
-	target.close()
+	if isDone {
+		target.close()
+	}
 }
 
 func splitTrailingUser(items []cliround.Item) (history, trailing []cliround.Item) {
@@ -119,6 +154,7 @@ func (d *Driver) OneShot(ctx context.Context, model string, request *cliround.Re
 	if err != nil {
 		return nil, err
 	}
+	defer d.releaseUtility(running)
 	bridge := running.process.bridge
 
 	running.partsMutex.Lock()
@@ -128,12 +164,12 @@ func (d *Driver) OneShot(ctx context.Context, model string, request *cliround.Re
 	defer bridge.forgetCompletion(id)
 	parts := chunkForMod(prompt)
 	for _, part := range parts[:len(parts)-1] {
-		if err := bridge.sendAcknowledged(ctx, command{Kind: "complete-part", ID: id, Text: part}, running.process.exited); err != nil {
+		if err := bridge.sendAcknowledged(ctx, command{Kind: commandCompletePart, ID: id, Text: part}, running.process.exited); err != nil {
 			running.partsMutex.Unlock()
 			return nil, err
 		}
 	}
-	complete := command{Kind: "complete", ID: id, Model: model, Prompt: parts[len(parts)-1], MaxTokens: oneShotMaxTokens, Effort: request.Effort}
+	complete := command{Kind: commandComplete, ID: id, Model: model, Prompt: parts[len(parts)-1], MaxTokens: oneShotMaxTokens, Effort: request.Effort}
 	if request.System != nil {
 		complete.System = *request.System
 	}

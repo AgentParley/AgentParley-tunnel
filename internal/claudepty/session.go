@@ -122,12 +122,16 @@ func encodedLength(text string) int {
 func utf16Length(text string) int {
 	units := 0
 	for _, character := range text {
-		units++
-		if character >= 0x10000 {
-			units++
-		}
+		units += utf16Width(character)
 	}
 	return units
+}
+
+func utf16Width(character rune) int {
+	if character >= 0x10000 {
+		return 2
+	}
+	return 1
 }
 
 func capToolResult(text string) string {
@@ -145,10 +149,7 @@ func capText(text string, limit int) string {
 	kept, units := 0, 0
 	for kept < len(text) {
 		character, size := utf8.DecodeRuneInString(text[kept:])
-		width := 1
-		if character >= 0x10000 {
-			width = 2
-		}
+		width := utf16Width(character)
 		if units+width > room {
 			break
 		}
@@ -258,7 +259,7 @@ func (s *Session) Extend(ctx context.Context, plan cliround.Plan, request *cliro
 	case len(plan.Results) > 0:
 		s.deliverResults(plan.Results, plan.NewInput)
 	case len(plan.NewInput) > 0:
-		if err := s.process.bridge.send(ctx, command{Kind: "submit", Text: joinTexts(plan.NewInput)}); err != nil {
+		if err := s.process.bridge.send(ctx, command{Kind: commandSubmit, Text: joinTexts(plan.NewInput)}); err != nil {
 			return nil, s.abort(current, err)
 		}
 	default:
@@ -294,6 +295,9 @@ func (s *Session) openRound() (*round, error) {
 	defer s.mutex.Unlock()
 	if s.closed || !s.process.alive() {
 		return nil, s.exitError()
+	}
+	if s.state == cliround.StateDirty {
+		return nil, cliround.ErrSessionDirty
 	}
 	current := &round{done: make(chan roundEnd, 1)}
 	s.current = current
@@ -414,13 +418,10 @@ func (s *Session) onStepStart(turnID string, index int) stepDecision {
 	}
 	if s.current == nil {
 		s.offRoundLocked("a model step")
-		return stepDecision{Mode: "made-up", StopReason: "end_turn"}
+		return stepDecision{Mode: stepModeMadeUp, StopReason: stopReasonEndTurn}
 	}
 	s.markRebuiltLocked()
-	if s.driver.benchmark {
-		return stepDecision{Mode: "made-up", Text: "benchmark", StopReason: "end_turn"}
-	}
-	return stepDecision{Mode: "real"}
+	return s.driver.decideStep()
 }
 
 func (s *Session) markRebuiltLocked() {
@@ -465,7 +466,7 @@ func (s *Session) onStepEnd(report stepReport) {
 	case len(calls) > 0:
 		current.calls = calls
 		s.finishLocked(current, cliround.OutcomeToolCalls, nil)
-	case report.StopReason == "model_context_window_exceeded":
+	case report.StopReason == stopReasonContextExceeded:
 		s.finishLocked(current, "", cliround.ErrContextFull)
 	}
 }
@@ -478,13 +479,13 @@ func (s *Session) onTurnComplete(report turnReport) {
 		return
 	}
 	switch report.Reason {
-	case "answer":
-		if current.lastStop == "max_tokens" && len(current.texts) == 0 {
+	case turnReasonAnswer:
+		if current.lastStop == stopReasonMaxTokens && len(current.texts) == 0 {
 			s.finishLocked(current, cliround.OutcomeLength, nil)
 			return
 		}
 		s.finishLocked(current, cliround.OutcomeAnswer, nil)
-	case "refusal":
+	case turnReasonRefusal:
 		explanation := ""
 		if report.Refusal != nil && report.Refusal.Explanation != nil {
 			explanation = strings.TrimSpace(*report.Refusal.Explanation)
@@ -494,7 +495,7 @@ func (s *Session) onTurnComplete(report turnReport) {
 		}
 		current.texts = append(current.texts, explanation)
 		s.finishLocked(current, cliround.OutcomeRefused, nil)
-	case "aborted":
+	case turnReasonAborted:
 		s.finishLocked(current, "", &cliround.HarnessError{Message: "Claude Code stopped the turn"})
 	default:
 		go s.failTurn(current)
@@ -534,14 +535,14 @@ func (s *Session) onEvent(event modEvent) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	switch event.Kind {
-	case "blocked_tool":
+	case eventBlockedTool:
 		recorded := cliround.Event{Kind: cliround.EventBlockedTool, Tool: event.Tool, Detail: event.Detail}
 		if s.current != nil && !s.current.finished {
 			s.current.events = append(s.current.events, recorded)
 		} else {
 			s.carriedEvents = append(s.carriedEvents, recorded)
 		}
-	case "error":
+	case eventError:
 		mapped := mapModError(event.Error, event.Detail)
 		if s.current != nil && !s.current.finished {
 			s.finishLocked(s.current, "", mapped)

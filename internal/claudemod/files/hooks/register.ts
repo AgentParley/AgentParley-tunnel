@@ -2,12 +2,20 @@ import type { Register } from 'claude-code'
 
 const PREFIX = 'mcp__agentparley__'
 const POLL_SECONDS = 25
+const BRIDGE_DEAD_MS = 30_000
+
+const COMMAND = { seed: 'seed', submit: 'submit', completePart: 'complete-part', complete: 'complete' } as const
+const STEP_MODE_MADE_UP = 'made-up'
+const EVENT = { blockedTool: 'blocked_tool', error: 'error' } as const
+const REFUSAL_REASON = 'refusal'
 
 type Reply = { status: number; text: string }
 type Json = Record<string, any>
 
 let bridge = ''
 let isStopped = false
+let failingSince: number | null = null
+const ranSeqs = new Set<number>()
 const promptText = { system: '', toolNote: '' }
 const completeParts = new Map<string, string>()
 
@@ -18,7 +26,23 @@ async function send($: any, method: string, path: string, body?: Json): Promise<
     init.headers = { 'content-type': 'application/json' }
   }
   const reply = await $.http.fetch('http://agentparley' + path, init)
+  failingSince = null
   return { status: reply.status, text: reply.text }
+}
+
+// Claude Code outlives a daemon that died without closing it; once the socket has been dead this long nobody is
+// coming back, and SIGTERM is the documented way a session ends from outside ($.process has no exit of its own).
+async function noteBridgeFault($: any, where: string, error: unknown): Promise<void> {
+  $.ui.log('agentparley bridge ' + where + ': ' + String(error), { to: 'debug' })
+  const now: number = await $.clock.now()
+  if (failingSince === null) {
+    failingSince = now
+    return
+  }
+  if (now - failingSince >= BRIDGE_DEAD_MS) {
+    isStopped = true
+    await $.process.run(['sh', '-c', 'kill -TERM "$PPID"']).catch(() => undefined)
+  }
 }
 
 async function post($: any, path: string, body: Json): Promise<Json> {
@@ -33,7 +57,7 @@ async function reportEvent($: any, kind: string, fields: Json): Promise<void> {
   try {
     await post($, '/event', { kind, ...fields })
   } catch (error) {
-    void error
+    await noteBridgeFault($, 'event', error)
   }
 }
 
@@ -43,23 +67,21 @@ function guardSlash(text: string): string {
 
 async function runCommand($: any, command: Json): Promise<void> {
   switch (command.kind) {
-    case 'seed': {
+    case COMMAND.seed: {
       await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: command.text }] } })
-      await post($, '/ack', { kind: 'seed' })
       return
     }
-    case 'submit': {
+    case COMMAND.submit: {
       $.prompt.submit({ text: guardSlash(command.text), asUser: true }).catch((error: unknown) => {
-        void reportEvent($, 'error', { error: 'invalid_request', detail: 'the prompt was not accepted: ' + String(error) })
+        void reportEvent($, EVENT.error, { error: 'invalid_request', detail: 'the prompt was not accepted: ' + String(error) })
       })
       return
     }
-    case 'complete-part': {
+    case COMMAND.completePart: {
       completeParts.set(command.id, (completeParts.get(command.id) ?? '') + command.text)
-      await post($, '/ack', { kind: 'complete-part' })
       return
     }
-    case 'complete': {
+    case COMMAND.complete: {
       const prompt = (completeParts.get(command.id) ?? '') + command.prompt
       completeParts.delete(command.id)
       const request: Json = { model: command.model, prompt, maxTokens: command.maxTokens }
@@ -91,23 +113,29 @@ async function tick($: any): Promise<void> {
   try {
     const reply = await send($, 'GET', '/next?wait=' + POLL_SECONDS)
     if (reply.status === 200) {
-      await runCommand($, JSON.parse(reply.text))
+      const command: Json = JSON.parse(reply.text)
+      if (!ranSeqs.has(command.seq)) {
+        await runCommand($, command)
+        ranSeqs.add(command.seq)
+      }
+      await post($, '/ack', { seq: command.seq })
     } else if (reply.status !== 204) {
       await $.clock.sleep(1000)
     }
   } catch (error) {
-    void error
+    await noteBridgeFault($, 'next', error)
     await $.clock.sleep(1000)
   }
   schedule($)
 }
 
+// Input that does not parse is forwarded as the raw string: it is not an object, so Platform answers the model with
+// invalid_arguments_json instead of running a call the model never made.
 function parseInput(json: string): unknown {
   try {
     return json === '' ? {} : JSON.parse(json)
-  } catch (error) {
-    void error
-    return {}
+  } catch {
+    return json
   }
 }
 
@@ -116,7 +144,7 @@ function isOurs(tool: string): boolean {
 }
 
 async function awaitResult($: any, callId: string, signal: AbortSignal): Promise<Json> {
-  while (!signal.aborted) {
+  while (!signal.aborted && !isStopped) {
     try {
       const reply = await send($, 'GET', '/result?callId=' + encodeURIComponent(callId) + '&wait=' + POLL_SECONDS)
       if (reply.status === 200) {
@@ -126,7 +154,7 @@ async function awaitResult($: any, callId: string, signal: AbortSignal): Promise
         return { deny: 'AgentParley could not deliver this tool result.' }
       }
     } catch (error) {
-      void error
+      await noteBridgeFault($, 'result', error)
       await $.clock.sleep(1000)
     }
   }
@@ -137,6 +165,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     bridge = (await $.env.get('AGENTPARLEY_BRIDGE')) ?? ''
     isStopped = false
+    failingSince = null
+    ranSeqs.clear()
     const version = (await $.session.version()).version
     const before = (await $.tool.list()).map(t => t.name)
     const hello = await post($, '/hello', { engineVersion: version, toolsBefore: before })
@@ -177,7 +207,7 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     if (!isOurs(e.tool)) {
-      await reportEvent($, 'blocked_tool', { tool: e.tool, detail: e.tool + ' was called' })
+      await reportEvent($, EVENT.blockedTool, { tool: e.tool, detail: e.tool + ' was called' })
       return { deny: 'Only AgentParley tools are available in this session.' }
     }
     const answer = await awaitResult($, e.tool_use_id, next.signal)
@@ -190,7 +220,7 @@ export const register: Register = on => {
   }).catch(() => ({ deny: 'Only AgentParley tools are available in this session.' }))
 
   on('command.run', async ($, e) => {
-    await reportEvent($, 'blocked_tool', { tool: '/' + e.command, detail: 'a slash command was attempted' })
+    await reportEvent($, EVENT.blockedTool, { tool: '/' + e.command, detail: 'a slash command was attempted' })
     return { text: '' }
   }).catch(() => ({ text: '' }))
 
@@ -201,7 +231,7 @@ export const register: Register = on => {
       return yield* next(e)
     }
     const decision = await post($, '/step-start', { turnId: e.turnId, index: e.index })
-    if (decision.mode === 'made-up') {
+    if (decision.mode === STEP_MODE_MADE_UP) {
       const toolUses: { name: string; input: unknown }[] = decision.toolUses ?? []
       const ids: string[] = decision.toolIds ?? []
       let block = 0
@@ -271,13 +301,13 @@ export const register: Register = on => {
       turnId: e.turnId,
       answer: e.answer,
       reason: e.reason,
-      refusal: e.reason === 'refusal' ? e.refusal : null,
+      refusal: e.reason === REFUSAL_REASON ? e.refusal : null,
     })
     return next(e)
   })
 
   on('classic.StopFailure', async ($, e, next) => {
-    await reportEvent($, 'error', { error: e.error, detail: e.error_details ?? '' })
+    await reportEvent($, EVENT.error, { error: e.error, detail: e.error_details ?? '' })
     return next(e)
   }).catch(($, e, next) => next(e))
 }

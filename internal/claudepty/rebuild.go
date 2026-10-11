@@ -118,9 +118,9 @@ func (s *Session) armReplay(window []cliround.Item) {
 	for _, item := range window {
 		switch item.Role {
 		case cliround.RoleAssistant:
-			step := stepDecision{Mode: "made-up", Text: item.Text, StopReason: "end_turn"}
+			step := stepDecision{Mode: stepModeMadeUp, Text: item.Text, StopReason: stopReasonEndTurn}
 			for _, call := range item.Calls {
-				step.StopReason = "tool_use"
+				step.StopReason = stopReasonToolUse
 				step.ToolUses = append(step.ToolUses, madeUpUse{Name: s.names.full(call.Name), Input: argumentsObject(call.Arguments)})
 				step.ToolIDs = append(step.ToolIDs, replayID(call.ID))
 			}
@@ -193,7 +193,7 @@ func (d *Driver) Factory(ctx context.Context, model string, request *cliround.Re
 
 	seedStarted := time.Now()
 	for _, chunk := range seedChunks(seed) {
-		if err := running.bridge.sendAcknowledged(rebuildCtx, command{Kind: "seed", Text: chunk}, running.exited); err != nil {
+		if err := running.bridge.sendAcknowledged(rebuildCtx, command{Kind: commandSeed, Text: chunk}, running.exited); err != nil {
 			return fail(err)
 		}
 	}
@@ -205,7 +205,7 @@ func (d *Driver) Factory(ctx context.Context, model string, request *cliround.Re
 	}
 	replayStarted := time.Now()
 	session.armReplay(window)
-	if err := running.bridge.send(rebuildCtx, command{Kind: "submit", Text: prompt}); err != nil {
+	if err := running.bridge.send(rebuildCtx, command{Kind: commandSubmit, Text: prompt}); err != nil {
 		return fail(err)
 	}
 	select {

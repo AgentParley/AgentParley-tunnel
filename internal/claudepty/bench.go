@@ -14,6 +14,23 @@ import (
 	"github.com/agentparley/tunnel/internal/managedcli"
 )
 
+// withStubAPI points Claude Code at a local stand-in for the API with a made-up login, so a run needs no login.
+func withStubAPI(baseURL string) DriverOption {
+	return func(driver *Driver) {
+		driver.token = func() (string, error) { return "sk-ant-oat01-benchmark-not-a-login", nil }
+		driver.extraEnvironment = []string{"ANTHROPIC_BASE_URL=" + baseURL}
+	}
+}
+
+// withBenchmarkSteps answers the step after the replayed window with a finished turn instead of a model request.
+func withBenchmarkSteps() DriverOption {
+	return func(driver *Driver) {
+		driver.decideStep = func() stepDecision {
+			return stepDecision{Mode: stepModeMadeUp, Text: "benchmark", StopReason: stopReasonEndTurn}
+		}
+	}
+}
+
 // benchmarkStepBytes is the size of one synthetic tool result.
 const benchmarkStepBytes = 1024
 
@@ -27,10 +44,7 @@ func RunReplayBenchmark(ctx context.Context, manifest func() managedcli.Manifest
 	}
 	defer stub.Close()
 
-	driver := NewDriver(manifest, log.New(io.Discard, "", 0))
-	driver.baseURL = baseURL
-	driver.stubToken = "sk-ant-oat01-benchmark-not-a-login"
-	driver.benchmark = true
+	driver := NewDriver(manifest, log.New(io.Discard, "", 0), withStubAPI(baseURL), withBenchmarkSteps())
 	defer driver.Shutdown()
 
 	fmt.Fprintf(output, "replay window %d steps, one step is a tool call plus a %d-byte result\n", ReplayStepWindow, benchmarkStepBytes)

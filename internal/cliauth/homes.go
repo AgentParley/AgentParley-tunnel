@@ -11,10 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/agentparley/tunnel/internal/cliround"
 	"github.com/agentparley/tunnel/internal/credstore"
+	"github.com/agentparley/tunnel/internal/managedcli"
 	"github.com/agentparley/tunnel/internal/sessions"
 )
 
@@ -96,15 +99,23 @@ func tokenPath() string {
 	return filepath.Join(cliDir(), tokenFileName)
 }
 
+// seedMutex keeps concurrent starts from interleaving their read-modify-write of the shared .claude.json.
+var seedMutex sync.Mutex
+
 // SeedClaudeConfig writes the onboarding and trust state Claude Code would otherwise ask for on screen, keeping any
 // other key Claude Code wrote itself.
 func SeedClaudeConfig(pinnedVersion string) error {
+	seedMutex.Lock()
+	defer seedMutex.Unlock()
 	configPath := filepath.Join(ClaudeHome(), ".claude.json")
 	settings := map[string]any{}
+	original := map[string]any{}
 	data, err := os.ReadFile(configPath)
 	if err == nil {
 		if err := json.Unmarshal(data, &settings); err != nil {
 			settings = map[string]any{}
+		} else {
+			_ = json.Unmarshal(data, &original)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -128,11 +139,14 @@ func SeedClaudeConfig(pinnedVersion string) error {
 	projects[workDir] = project
 	settings["projects"] = projects
 
+	if err == nil && reflect.DeepEqual(original, settings) {
+		return nil
+	}
 	encoded, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configPath, encoded, privateFileMode)
+	return managedcli.WriteFileAtomic(configPath, encoded)
 }
 
 // ClaudeToken returns the long-lived Claude Code login token stored at register time.
