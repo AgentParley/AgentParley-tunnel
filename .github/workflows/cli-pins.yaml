@@ -1,0 +1,150 @@
+# Keeps the pinned Codex and Claude Code builds current.
+#
+# Every box runs its own pinned copy of each CLI, chosen by internal/managedcli/cli-pins.json (embedded in the daemon)
+# and by a signed copy of that file published at https://get.agentparley.ai/tunnel/cli-pins.json, which boxes fetch
+# every six hours. A pin bump therefore never needs a daemon release.
+#
+#   check    daily (or by hand): is a newer Codex or Claude Code out? If so, download it, build the daemon, sign both
+#            CLIs in with the probe logins, and run `agentparley doctor --pins` against the candidate list. Probes
+#            pass: open a pull request that bumps the pin file. Probes fail, or cannot run: open an issue.
+#   publish  after a pull request that changes cli-pins.json is merged: sign the file with RELEASE_SIGNING_KEY and
+#            upload it, with its signature, to the release bucket.
+#
+# Secrets (repository): RELEASE_SIGNING_KEY (the Ed25519 key release.yaml also signs with), PROBE_OPENAI_API_KEY and
+# PROBE_CLAUDE_OAUTH_TOKEN (from `claude setup-token`, on a test account) for the probes.
+#
+# AWS access is GitHub OIDC into the agentparley-tunnel-release role, the same one release.yaml uses. That role's trust
+# policy (AgentParley's infrastructure/aws/global.yaml) must allow this repository's main branch for the publish job.
+name: cli-pins
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["internal/managedcli/cli-pins.json"]
+
+env:
+  BUCKET: get.agentparley.ai
+
+jobs:
+  check:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+      PROBE_OPENAI_API_KEY: ${{ secrets.PROBE_OPENAI_API_KEY }}
+      PROBE_CLAUDE_OAUTH_TOKEN: ${{ secrets.PROBE_CLAUDE_OAUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+
+      - name: look for newer builds
+        id: check
+        run: |
+          go run ./cmd/clipins check -out candidate.json | tee check.txt
+          grep '^changed=' check.txt >> "$GITHUB_OUTPUT"
+          echo "codex=$(grep '^codex=' check.txt | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+          echo "claude=$(grep '^claude=' check.txt | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: stop here when the probe logins are missing
+        if: steps.check.outputs.changed == 'true'
+        id: logins
+        run: |
+          if [ -z "$PROBE_OPENAI_API_KEY" ] || [ -z "$PROBE_CLAUDE_OAUTH_TOKEN" ]; then
+            echo "usable=false" >> "$GITHUB_OUTPUT"
+            gh issue create \
+              --title "CLI pin probe could not run (codex ${{ steps.check.outputs.codex }}, claude ${{ steps.check.outputs.claude }})" \
+              --body "A newer Codex or Claude Code build is out, but PROBE_OPENAI_API_KEY and/or PROBE_CLAUDE_OAUTH_TOKEN are not set on this repository, so the register probes could not run against it. Add both secrets; the next scheduled run (or a manual run of this workflow) will retry."
+          else
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: probe the candidate builds
+        if: steps.check.outputs.changed == 'true' && steps.logins.outputs.usable == 'true'
+        id: probe
+        run: |
+          go build -o agentparley .
+          export AGENTPARLEY_STATE_DIR="$RUNNER_TEMP/agentparley-state"
+          mkdir -p "$AGENTPARLEY_STATE_DIR/cli/codex-home" "$AGENTPARLEY_STATE_DIR/cli/bin"
+
+          # The daemon's own private logins, the ones `agentparley register` makes on a box.
+          codex_url=$(jq -r '.harnesses.codex.assets["linux/amd64"].url' candidate.json)
+          codex_member=$(jq -r '.harnesses.codex.assets["linux/amd64"].archiveMember' candidate.json)
+          mkdir -p "$RUNNER_TEMP/codex-login"
+          curl -fsSL "$codex_url" | tar -xz -C "$RUNNER_TEMP/codex-login" "$codex_member"
+          printenv PROBE_OPENAI_API_KEY | CODEX_HOME="$AGENTPARLEY_STATE_DIR/cli/codex-home" \
+            "$RUNNER_TEMP/codex-login/$codex_member" login --with-api-key
+          (umask 077 && printenv PROBE_CLAUDE_OAUTH_TOKEN > "$AGENTPARLEY_STATE_DIR/cli/claude-oauth-token")
+
+          set +e
+          ./agentparley doctor --pins candidate.json 2>&1 | tee doctor.txt
+          status=${PIPESTATUS[0]}
+          echo "passed=$([ "$status" = 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: open a pull request for the bump
+        if: steps.probe.outputs.passed == 'true'
+        run: |
+          branch="cli-pins-codex-${{ steps.check.outputs.codex }}-claude-${{ steps.check.outputs.claude }}"
+          git config user.name "agentparley-bot"
+          git config user.email "bot@agentparley.ai"
+          git checkout -b "$branch"
+          cp candidate.json internal/managedcli/cli-pins.json
+          git add internal/managedcli/cli-pins.json
+          git commit -m "Pin Codex ${{ steps.check.outputs.codex }} and Claude Code ${{ steps.check.outputs.claude }}"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Pin Codex ${{ steps.check.outputs.codex }} and Claude Code ${{ steps.check.outputs.claude }}" \
+            --body "The register probes passed against these builds. Merging publishes the signed pin list; boxes pick it up within six hours.
+
+          $(sed 's/^/    /' doctor.txt)"
+
+      - name: open an issue when the probes failed
+        if: steps.probe.outputs.passed == 'false'
+        run: |
+          gh issue create \
+            --title "CLI pin probe failed (codex ${{ steps.check.outputs.codex }}, claude ${{ steps.check.outputs.claude }})" \
+            --body "The register probes failed against the newest builds, so the pin list was not bumped.
+
+          $(sed 's/^/    /' doctor.txt)"
+
+  publish:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+
+      - name: sign the pin list
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: go run ./cmd/clipins sign internal/managedcli/cli-pins.json
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::990851549648:role/agentparley-tunnel-release
+          aws-region: eu-central-1
+
+      - name: publish
+        run: |
+          # Between the two uploads a box can read a list and a signature that do not belong together; the daemon
+          # ignores a pair that does not verify and asks again at its next refresh.
+          aws s3 cp internal/managedcli/cli-pins.json.sig "s3://$BUCKET/tunnel/cli-pins.json.sig" \
+            --cache-control "public, max-age=300" --content-type "text/plain"
+          aws s3 cp internal/managedcli/cli-pins.json "s3://$BUCKET/tunnel/cli-pins.json" \
+            --cache-control "public, max-age=300" --content-type "application/json"

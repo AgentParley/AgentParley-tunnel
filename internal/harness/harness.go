@@ -1,12 +1,14 @@
-// Package harness is the daemon-side owner of local-model detection, model listing, and invocation for the four
-// harnesses this box can expose: two agentic CLIs pinned into non-agentic, tool-free model endpoints (codex,
-// claude), and two OpenAI-compatible HTTP servers (ollama, openai-compatible-local). Nothing here ever accepts a
-// URL, binary path, flag, or argv fragment from the wire — every Harness resolves what to call solely from this
-// box's own local config, its own built-in defaults, or what `register` already found and persisted on THIS box
-// (see discovery.go) — which is the whole point of the tunnel design: a compromised platform can name a harness
-// and a model, never how that harness is invoked. A model id IS wire-supplied (InvokeHarnessCall.model), so every
-// Invoke that turns it into a flag VALUE (codex's -m) first requires a plain model-slug shape — never an arbitrary
-// wire string reaching a subprocess argv unchecked.
+// Package harness is the daemon-side owner of local-model detection, model listing and invocation for the four
+// harnesses this box can expose: two CLIs the daemon runs itself (codex, claude) and two OpenAI-compatible HTTP
+// servers (ollama, openai-compatible-local).
+//
+// The CLI harnesses keep a warm session per conversation and show the model only the tools a round lists: Platform
+// sends the chat, one model step at a time, and the session either returns the model's tool calls (and waits for the
+// results in the next round) or its final answer. Everything about how a CLI is launched is fixed by the daemon — its
+// own pinned build, its own private configuration folder and login, its own argv and environment. Nothing here ever
+// accepts a URL, binary path, flag or argv fragment from the wire: the wire only names a harness, a model id and a
+// round. A model id is wire-supplied, so every Invoke that turns it into a flag value first requires a plain
+// model-slug shape.
 package harness
 
 import (
@@ -37,8 +39,8 @@ type Model struct {
 }
 
 // InvokeOutcome is what Invoke hands back for the platform to interpret — this package never interprets it itself.
-// StatusCode is the local HTTP status (server family) or process exit code (CLI family); Payload is the response
-// body / stdout verbatim; ErrorOutput is stderr (CLI family) or empty (server family).
+// For the server family StatusCode is the local HTTP status, Payload the response body, ErrorOutput empty. For the CLI
+// family Payload is the round result JSON, and a failed round is an error, never a status code.
 type InvokeOutcome struct {
 	Payload     string
 	StatusCode  int
@@ -47,18 +49,18 @@ type InvokeOutcome struct {
 
 // Harness is the daemon-side contract every one of the four kinds implements.
 type Harness interface {
-	// Detect reports whether this harness can run on this box right now — binary on PATH / server answers — and,
-	// for the CLI family, additionally PROVES the non-agentic pin (built-ins disabled, MCP servers not loaded,
-	// local settings unable to re-enable either) against an empirically-established minimum version floor. The
-	// returned error message is user-facing: it is what `register` prints when it refuses a harness.
+	// Detect reports whether this harness can run on this box right now — server answers, or, for the CLI family,
+	// the pinned build is installed, signed in with the daemon's own login, and passes a real probe round: it calls
+	// an AgentParley tool directly and reads history it was handed, with no native tool involved. The returned error
+	// message is user-facing: it is what `register` prints when it refuses a harness.
 	Detect(ctx context.Context) error
 	// ListModels lists this box's locally-available models. Every returned Model.ContextWindowTokens is > 0; a
 	// model whose window cannot be determined is omitted from the list AND causes ListModels to fail with an error
 	// naming the affected model and the exact config key to set — fail closed, never a 0 or a default.
 	ListModels(ctx context.Context) ([]Model, error)
-	// Invoke runs one completion against model with the given payload (opaque to this package — the caller, C#,
-	// owns the request/response shape). ctx carries the operation deadline; every implementation cancels its local
-	// HTTP call or subprocess when ctx is done, so a timed-out invoke is actually killed on the box.
+	// Invoke runs one completion (the server family) or one round (the CLI family) against model with the given
+	// payload (opaque to this package — the caller, C#, owns the request/response shape). ctx carries the operation
+	// deadline; every implementation cancels its local HTTP call or CLI round when ctx is done.
 	Invoke(ctx context.Context, model, payload string) (InvokeOutcome, error)
 }
 
@@ -66,7 +68,7 @@ type Harness interface {
 // unknown name, or missing REQUIRED config (openai-compatible-local's url has no built-in default). It is called
 // per invoke (dispatch.go) as well as by `register`, so it re-reads the discovery file on every call — a small
 // local file read, cheap enough to skip caching — merging whatever `register` found in under whatever config.yaml
-// already says (config always wins; see withDiscoveredURL and the CLI constructors).
+// already says (config always wins; see withDiscoveredURL).
 //
 // cliSessions and pins are the daemon's warm CLI sessions and managed CLI builds. A caller outside the running
 // daemon (register, doctor) passes nil for both: the harness then reads the persisted or embedded pin list and can
@@ -83,7 +85,7 @@ func Resolve(harnessName string, tunnelConfig *config.Config, cliSessions *cliro
 	case Codex:
 		return newCodexHarness(harnessConfig, cliSessions, pins), nil
 	case Claude:
-		return newClaudeHarness(harnessConfig, discovered), nil
+		return newClaudeHarness(harnessConfig, cliSessions, pins), nil
 	case Ollama:
 		return newOllamaHarness(withDiscoveredURL(harnessConfig, discovered)), nil
 	case OpenAICompatibleLocal:

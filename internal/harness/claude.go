@@ -2,141 +2,148 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"log"
+	"regexp"
 	"strings"
+	"time"
 
+	"github.com/agentparley/tunnel/internal/claudepty"
+	"github.com/agentparley/tunnel/internal/cliauth"
+	"github.com/agentparley/tunnel/internal/cliround"
 	"github.com/agentparley/tunnel/internal/config"
+	"github.com/agentparley/tunnel/internal/managedcli"
 )
 
-// claudeMinVersion is the lowest Claude Code CLI version this daemon trusts to leave NO tool source when pinned
-// with claudeArgs below. 2.1.207 is the OLDEST version verified by hand to carry --safe-mode and
-// --strict-mcp-config; the floor started at 2.1.224 purely because that was the dev machine's version, and it
-// wrongly refused a real 2.1.207 install. The capability probe below is the gate that proves every pinned flag
-// works on the installed CLI — this floor only keeps out releases too old to have been looked at.
-const (
-	claudeMinMajor = 2
-	claudeMinMinor = 1
-	claudeMinPatch = 207
-)
-
-// claudeProbePrompt is the trivial throwaway prompt Detect sends through the real pinned argv (see claudeArgs) to
-// empirically prove the installed claude CLI accepts every pinned flag AND is signed in — the version floor above
-// proves the flags exist in this release (hand-checked against 2.1.224's --help), but not that this particular
-// install is actually logged in, which registration should confirm before advertising its models to the console.
-const claudeProbePrompt = "reply with: ok"
-
+// claudeDefaultModels are the aliases Claude Code resolves to its current models; the context window is held
+// conservative (see HarnessModelConfig.ContextWindowTokens).
 var claudeDefaultModels = []Model{
 	{ID: "opus", Label: "Claude Opus (via claude CLI)", ContextWindowTokens: 200_000},
 	{ID: "sonnet", Label: "Claude Sonnet (via claude CLI)", ContextWindowTokens: 200_000},
 	{ID: "haiku", Label: "Claude Haiku (via claude CLI)", ContextWindowTokens: 200_000},
 }
 
+const (
+	claudeProbeBudget = 120 * time.Second
+	claudeProbeWord   = "PAPAYA"
+)
+
 type claudeHarness struct {
-	command      string
-	path         string
 	modelConfigs []config.HarnessModelConfig
+	sessions     *cliround.Manager
+	manifest     func() managedcli.Manifest
 }
 
-func newClaudeHarness(harnessConfig config.HarnessConfig, discovered discoveredHarness) *claudeHarness {
-	command := harnessConfig.Command
-	if command == "" {
-		command = discovered.Command
-	}
-	if command == "" {
-		command = "claude"
-	}
-	return &claudeHarness{command: command, path: discovered.Path, modelConfigs: harnessConfig.Models}
+func newClaudeHarness(harnessConfig config.HarnessConfig, cliSessions *cliround.Manager, pins *managedcli.Refresher) *claudeHarness {
+	return &claudeHarness{modelConfigs: harnessConfig.Models, sessions: cliSessions, manifest: manifestSource(pins)}
 }
 
+func (h *claudeHarness) driver() *claudepty.Driver {
+	return claudepty.Shared(h.manifest, log.Default())
+}
+
+// Detect proves the pinned Claude Code build is installed, signed in with the daemon's own login, shows no startup
+// screen, registers and calls an AgentParley tool, and reads a history row seeded into it.
 func (h *claudeHarness) Detect(ctx context.Context) error {
-	resolvedPath, err := exec.LookPath(h.command)
-	if err != nil {
-		if filepath.IsAbs(h.command) {
-			return fmt.Errorf("%q no longer exists — it may have been moved or uninstalled; re-run 'agentparley register' to rediscover claude: %w", h.command, err)
-		}
-		return fmt.Errorf("claude CLI (%q) not found on PATH: %w", h.command, err)
+	if !cliauth.HasClaudeLogin() {
+		return errors.New("Claude Code is not signed in for AgentParley — run `agentparley register claude`")
+	}
+	if _, _, err := managedcli.Ensure(ctx, h.manifest(), "claude"); err != nil {
+		return err
 	}
 
-	versionCtx, cancel := context.WithTimeout(ctx, capabilityProbeTimeout)
+	probeCtx, cancel := context.WithTimeout(ctx, claudeProbeBudget)
 	defer cancel()
-	versionCmd := exec.CommandContext(versionCtx, resolvedPath, "--version")
-	versionCmd.Env = envWithPath(h.path)
-	versionOutput, err := versionCmd.Output()
+	driver := claudepty.NewDriver(h.manifest, log.Default())
+	defer driver.Shutdown()
+	if err := probeToolCallAndSeed(probeCtx, driver, claudeDefaultModels[0].ID); err != nil {
+		return fmt.Errorf("the tool-call probe failed: %w", err)
+	}
+	return nil
+}
+
+func probeToolCallAndSeed(ctx context.Context, driver *claudepty.Driver, model string) error {
+	request := &cliround.Request{
+		Effort: "low",
+		Tools:  []cliround.Tool{probeEchoTool},
+		Items: []cliround.Item{
+			{Key: "p1", Role: cliround.RoleUser, Text: "The probe word is " + claudeProbeWord + "."},
+			{Key: "p2", Role: cliround.RoleAssistant, Text: "Noted."},
+			{Key: "p3", Role: cliround.RoleUser, Text: "Call probe_echo with x=1, then reply with the probe word."},
+		},
+	}
+	runner, first, err := driver.Factory(ctx, model, request, probeBudgets(ctx))
 	if err != nil {
-		return fmt.Errorf("running %q --version: %w", h.command, err)
+		return err
+	}
+	defer runner.Close()
+	if err := requireNoNativeUse(first); err != nil {
+		return err
+	}
+	if first.Outcome != cliround.OutcomeToolCalls || len(first.Calls) != 1 || first.Calls[0].Name != "probe_echo" {
+		return fmt.Errorf("expected one probe_echo call, got outcome %q with %d call(s)", first.Outcome, len(first.Calls))
 	}
 
-	isVersionSupported, err := meetsFloor(string(versionOutput), claudeMinMajor, claudeMinMinor, claudeMinPatch)
+	plan := cliround.Plan{Results: []cliround.Item{{Role: cliround.RoleTool, CallID: first.Calls[0].ID, Text: `{"echo":1}`}}}
+	second, err := runner.Extend(ctx, plan, request)
 	if err != nil {
-		return fmt.Errorf("could not parse claude CLI version from %q: %w", strings.TrimSpace(string(versionOutput)), err)
+		return err
 	}
-	if !isVersionSupported {
-		return fmt.Errorf("claude CLI version %q is older than the minimum %d.%d.%d required to prove the non-agentic pin (--tools, --permission-mode dontAsk, --setting-sources, --strict-mcp-config) — upgrade the CLI before registering this harness",
-			strings.TrimSpace(string(versionOutput)), claudeMinMajor, claudeMinMinor, claudeMinPatch)
+	if err := requireNoNativeUse(second); err != nil {
+		return err
 	}
+	if second.Outcome != cliround.OutcomeAnswer || !strings.Contains(strings.ToUpper(second.Text), claudeProbeWord) {
+		return fmt.Errorf("expected an answer containing the seeded probe word, got outcome %q: %q", second.Outcome, second.Text)
+	}
+	return nil
+}
 
-	return runCapabilityProbe(ctx, resolvedPath, claudeArgs(claudeDefaultModels[0].ID, "", ""), claudeProbePrompt, h.path, parseClaudeJSON)
+// requireNoNativeUse fails a probe round in which Claude Code reached for anything that is not an AgentParley tool.
+func requireNoNativeUse(result *cliround.Result) error {
+	for _, event := range result.Events {
+		if event.Kind == cliround.EventBlockedTool || event.Kind == cliround.EventInternalStep {
+			return fmt.Errorf("Claude Code used a native tool: %s (%s)", event.Tool, event.Detail)
+		}
+	}
+	return nil
 }
 
 func (h *claudeHarness) ListModels(ctx context.Context) ([]Model, error) {
 	return resolveCLIModels(claudeDefaultModels, h.modelConfigs, Claude)
 }
 
+var claudeModelID = regexp.MustCompile(`^[a-z0-9][a-z0-9._\-\[\]]{0,63}$`)
+
+// Invoke runs one round: the request's history is reconciled with the conversation's warm Claude Code, which is
+// extended or rebuilt, and the model's next step comes back as the round result.
 func (h *claudeHarness) Invoke(ctx context.Context, model, payload string) (InvokeOutcome, error) {
-	decoded, err := parseClaudeCodexPayload(payload)
+	request, err := cliround.ParseRequest(payload)
 	if err != nil {
 		return InvokeOutcome{}, err
 	}
-
-	systemPromptFile := ""
-	if decoded.SystemPrompt != "" {
-		promptDir, err := os.MkdirTemp("", "agentparley-harness-prompt-*")
-		if err != nil {
-			return InvokeOutcome{}, fmt.Errorf("creating a directory for the claude system prompt: %w", err)
-		}
-		defer os.RemoveAll(promptDir)
-
-		systemPromptFile = filepath.Join(promptDir, "system-prompt.txt")
-		if err := os.WriteFile(systemPromptFile, []byte(decoded.SystemPrompt), 0o600); err != nil {
-			return InvokeOutcome{}, fmt.Errorf("writing the claude system prompt file: %w", err)
-		}
+	if !claudeModelID.MatchString(model) {
+		return InvokeOutcome{}, &cliround.InvalidRequestError{Message: fmt.Sprintf("model %q is not a valid claude model id", model)}
+	}
+	if h.sessions == nil {
+		return InvokeOutcome{}, errors.New("this process has no CLI session manager")
 	}
 
-	return runCLI(ctx, h.command, claudeArgs(model, systemPromptFile, decoded.ReasoningEffort), decoded.Prompt, h.path)
-}
-
-// claudeArgs is the FIXED, daemon-owned argv for every claude invocation (Detect's probe and Invoke alike) —
-// never built from wire input. --tools "" removes every built-in tool (an allowlist of none, so tools added in
-// later CLI releases stay off — a name denylist goes stale); --permission-mode dontAsk denies anything that would
-// still prompt, whatever the box owner's own default mode is; --setting-sources "" stops the owner's user/project/
-// local settings (a bypassPermissions default, hooks, CLAUDE.md) from applying; --strict-mcp-config with no
-// --mcp-config leaves no MCP servers; --safe-mode additionally switches off plugins, skills and hooks.
-// systemPromptFile, when set, is read by the CLI so the prompt never appears in the process list.
-//
-// NEVER add --bare, despite Anthropic's docs recommending it for scripted use: it disables OAuth and keychain
-// reads, so the subscription login this harness exists to spend stops working and the CLI demands an API key —
-// and a user with an API key needs no tunnel at all. Those docs also say --bare will become the -p default in a
-// future release, at which point Detect's probe starts failing "not signed in"; that is the fail-closed signal to
-// pin the old behaviour explicitly, not to adopt --bare.
-func claudeArgs(model, systemPromptFile, reasoningEffort string) []string {
-	args := []string{
-		"-p", "--output-format", "json",
-		"--model", model,
-		"--safe-mode",
-		"--tools", "",
-		"--permission-mode", "dontAsk",
-		"--setting-sources", "",
-		"--strict-mcp-config",
-		"--no-session-persistence",
+	driver := h.driver()
+	result, err := h.sessions.Round(ctx, Claude, model, request, driver.Factory, driver.OneShot)
+	if err != nil {
+		return InvokeOutcome{}, err
 	}
-	if systemPromptFile != "" {
-		args = append(args, "--append-system-prompt-file", systemPromptFile)
+	if result.Calls == nil {
+		result.Calls = []cliround.Call{}
 	}
-	if reasoningEffort != "" {
-		args = append(args, "--effort", reasoningEffort)
+	if result.Events == nil {
+		result.Events = []cliround.Event{}
 	}
-	return args
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return InvokeOutcome{}, err
+	}
+	return InvokeOutcome{Payload: string(encoded)}, nil
 }

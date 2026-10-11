@@ -11,9 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/agentparley/tunnel/internal/claudepty"
 	"github.com/agentparley/tunnel/internal/config"
 	"github.com/agentparley/tunnel/internal/credstore"
 	"github.com/agentparley/tunnel/internal/harness"
@@ -49,8 +51,21 @@ const (
 func runDoctor(args []string) error {
 	flagSet := flag.NewFlagSet("doctor", flag.ExitOnError)
 	configPath := flagSet.String("config", config.DefaultPath, "path to config.yaml")
+	pinsPath := flagSet.String("pins", "", "probe the CLI harnesses (codex, claude) against this unsigned pin list and exit; no other check runs (used by CI)")
+	benchSteps := flagSet.String("bench-claude-replay", "", "time rebuilding a Claude Code session for histories of these step counts (comma separated), then exit")
 	if err := flagSet.Parse(args); err != nil {
 		return err
+	}
+
+	if *benchSteps != "" {
+		return runReplayBenchmark(*benchSteps)
+	}
+	if *pinsPath != "" {
+		manifest, err := managedcli.ReadManifestFile(*pinsPath)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", *pinsPath, err)
+		}
+		return doctorPinList(managedcli.NewFixedRefresher(manifest, log.Default()))
 	}
 
 	tunnelConfig, configErr := config.Load(*configPath)
@@ -287,7 +302,7 @@ func doctorProviders(tunnelConfig *config.Config, configErr error, runAsUser *sh
 		return outcomeSkip
 	}
 
-	printPinSummary()
+	printPinSummary(nil)
 	fmt.Println("  (checking providers, this sends each CLI a tiny test prompt…)")
 
 	harnessPolicy := policy.New(tunnelConfig)
@@ -346,13 +361,54 @@ func harnessesToCheck(tunnelConfig *config.Config) ([]string, error) {
 	return names, nil
 }
 
-// printPinSummary shows which pin list this box is using and the CLI versions it pins.
-func printPinSummary() {
-	current := managedcli.NewRefresher(credstore.StateDir(), log.Default()).Current()
+// printPinSummary shows which pin list the checks use (the box's own unless pins was given) and the CLI versions it pins.
+func printPinSummary(pins *managedcli.Refresher) {
+	if pins == nil {
+		pins = managedcli.NewRefresher(credstore.StateDir(), log.Default())
+	}
+	current := pins.Current()
 	versions := make([]string, 0, len(current.Harnesses))
 	for name, pin := range current.Harnesses {
 		versions = append(versions, name+" "+pin.Version)
 	}
 	sort.Strings(versions)
 	fmt.Printf("  pins: serial %d — %s\n", current.Serial, strings.Join(versions, ", "))
+}
+
+// runReplayBenchmark is `doctor --bench-claude-replay 500,2000`.
+func runReplayBenchmark(stepCounts string) error {
+	var steps []int
+	for _, field := range strings.Split(stepCounts, ",") {
+		count, err := strconv.Atoi(strings.TrimSpace(field))
+		if err != nil || count <= 0 {
+			return fmt.Errorf("--bench-claude-replay wants positive step counts like 500,2000, got %q", field)
+		}
+		steps = append(steps, count)
+	}
+	pins := managedcli.NewRefresher(credstore.StateDir(), log.Default())
+	return claudepty.RunReplayBenchmark(context.Background(), pins.Current, steps, os.Stdout)
+}
+
+// doctorPinList is `doctor --pins`: sign-in and probe each CLI harness against a candidate pin list and exit non-zero
+// when any fails. CI runs it before a pin bump becomes a pull request; it needs only the daemon's own CLI logins.
+func doctorPinList(pins *managedcli.Refresher) error {
+	printPinSummary(pins)
+	probeConfig := &config.Config{}
+	failed := false
+	for _, name := range []string{harness.Codex, harness.Claude} {
+		resolvedHarness, err := harness.Resolve(name, probeConfig, nil, pins)
+		if err == nil {
+			err = resolvedHarness.Detect(context.Background())
+		}
+		if err != nil {
+			failed = true
+			printCheck("✗", name, err.Error())
+			continue
+		}
+		printCheck("✓", name, "ready")
+	}
+	if failed {
+		os.Exit(1)
+	}
+	return nil
 }

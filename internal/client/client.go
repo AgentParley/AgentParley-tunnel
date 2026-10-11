@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/agentparley/tunnel/internal/claudepty"
 	"github.com/agentparley/tunnel/internal/cliround"
 	"github.com/agentparley/tunnel/internal/codexrpc"
 	"github.com/agentparley/tunnel/internal/config"
@@ -143,6 +144,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	defer codexrpc.Shutdown()
+	defer claudepty.Shutdown()
 	defer d.cliSessions.Close()
 	managedcli.PruneOldVersions(d.pins.Current())
 	go d.pins.Run(ctx)
@@ -263,9 +265,9 @@ func (d *Daemon) serve(ctx context.Context, stream tunnelpb.TunnelService_Connec
 	// drop, Shutdown, ctx cancellation) — not just when the result can no longer be delivered. Without this, an
 	// in-flight invoke_harness (up to 600s: a local model completion or a CLI run) keeps running under the
 	// daemon-lifetime ctx after its stream is gone, the daemon reconnects in about a second, and the platform's
-	// retry lands a SECOND identical multi-minute job on the box while the first is still burning it. runCLI
-	// already SIGKILLs on ctx cancellation and the server-family HTTP calls already honor ctx — only the wiring
-	// from stream lifetime to operation ctx was missing.
+	// retry lands a SECOND identical multi-minute job on the box while the first is still burning it. A CLI
+	// round and the server-family HTTP calls already stop on ctx cancellation — only the wiring from stream lifetime
+	// to operation ctx was missing.
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 	go d.runWriter(stream, sendQueue, sendErrors, done)

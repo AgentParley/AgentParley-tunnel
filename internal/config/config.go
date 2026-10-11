@@ -57,16 +57,15 @@ type Config struct {
 }
 
 // HarnessConfig is one harness's local connection details. URL is used by the server family (ollama defaults to
-// http://localhost:11434; openai-compatible-local has no default and is REQUIRED). Command is used by the CLI
-// family (defaults to "codex"/"claude", resolved via PATH). MaxWarmSessions and WarmIdleMinutes size the CLI
-// family's warm sessions (zero = the built-in default: 8 for claude, 32 for codex, 30 minutes idle). Models is the only way to supply a context window the
-// box can't discover on its own — for the server family it OVERRIDES fields on a model the server already reported
+// http://localhost:11434; openai-compatible-local has no default and is REQUIRED). The CLI family has no command
+// key: the daemon runs its own pinned copy of Codex and Claude Code. MaxWarmSessions and WarmIdleMinutes size the CLI
+// family's warm sessions (zero = the built-in default: 8 for claude, 32 for codex, 30 minutes idle). Models is the
+// only way to supply a context window the box can't discover on its own — for the server family it OVERRIDES fields on a model the server already reported
 // (an entry for an id the server didn't list is silently ignored, see mergeServerModelOverrides); for the CLI
-// family it REPLACES the built-in model list wholesale (see clihelpers.go).
+// family it REPLACES the built-in model list wholesale (see managed.go).
 type HarnessConfig struct {
-	URL     string               `yaml:"url"`
-	Command string               `yaml:"command"`
-	Models  []HarnessModelConfig `yaml:"models"`
+	URL    string               `yaml:"url"`
+	Models []HarnessModelConfig `yaml:"models"`
 
 	MaxWarmSessions int `yaml:"max_warm_sessions"`
 	WarmIdleMinutes int `yaml:"warm_idle_minutes"`

@@ -12,17 +12,18 @@ deny_commands: []
 enabled: true
 
 # Local model harnesses: THE way to expose them is `agentparley register` (no argument) — it scans codex,
-# claude, ollama, and openai-compatible-local, auto-discovering a CLI installed under your login shell (nvm,
-# ~/.npm-global) or a local server on a well-known port, and persists what it finds to
-# /var/lib/agentparley/harnesses.json — no config.yaml edit, no restart. `register <harness>` /
-# `unregister <harness>` work on just one. Everything below is OPTIONAL — set only to override what `register`
-# would find on its own, or to supply what it can't (a bespoke server's URL, a model's context window). See the
-# tunnel design doc's non-agentic pin for why the CLI harnesses never take arbitrary flags from config.
+# claude, ollama, and openai-compatible-local. codex and claude run as the daemon's own pinned copies with a login
+# of their own (`register codex` / `register claude` sign them in); a local server is found on a well-known port.
+# What it finds is persisted to /var/lib/agentparley/harnesses.json — no config.yaml edit, no restart.
+# `register <harness>` / `unregister <harness>` work on just one. Everything below is OPTIONAL — set only to size
+# the CLI harnesses' warm sessions, or to supply what `register` can't find (a bespoke server's URL, a model's
+# context window). The CLI harnesses never take a command or any flag from config.
 # harnesses:
 #   codex:
-#     command: codex                # overrides discovery; defaults to letting `register` find it
+#     max_warm_sessions: 32          # chats kept warm at once (default 32)
+#     warm_idle_minutes: 30          # a warm chat idle this long is closed (default 30)
 #   claude:
-#     command: claude                # overrides discovery; defaults to letting `register` find it
+#     max_warm_sessions: 8           # each warm Claude Code chat is a ~300 MB process (default 8)
 #   ollama:
 #     url: http://localhost:11434    # this is the default; only needed to override
 #   openai-compatible-local:

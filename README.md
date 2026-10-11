@@ -34,10 +34,11 @@ this daemon  --outbound gRPC-->  SSH egress service  <--Runtime posts commands h
 - **`logout`** — revokes this install server-side (`POST /tunnel/revoke`, authenticated the same way as a token
   refresh) and then deletes the local credentials and key. The local wipe always happens, even if the box cannot
   reach the PlatformApi — a box that can't reach us must still be able to disarm itself.
-- **`register`** — finds and registers this box's own local model harnesses (codex, claude, ollama, an
-  OpenAI-compatible server) so AgentParley can route completions to them. See "Registering local model harnesses"
-  below.
-- **`unregister <harness>`** — removes this box's provider for one harness (`register`'s counterpart).
+- **`register`** — registers this box's own local model harnesses (codex, claude, ollama, an OpenAI-compatible
+  server) so AgentParley can route completions to them. For codex and claude it installs the daemon's own pinned
+  copy of the CLI and signs it in with a login of its own. See "Registering local model harnesses" below.
+- **`unregister <harness>`** — removes this box's provider for one harness (`register`'s counterpart). For codex and
+  claude it also deletes the daemon's login and installed copy.
 - **`update`** — downloads and installs the latest (or, for rollback, an older) published release, and restarts
   the systemd unit if it's enabled and was active. See "Updating" below.
 - **`doctor`** — read-only diagnosis: version, config, service status, connectivity, clock skew, and local model
@@ -175,6 +176,13 @@ hint); providers re-runs each already-registered harness's own readiness check (
 `register` uses — without registering anything. Exits 0 if every check passed (skips don't count against it), 1
 if anything failed.
 
+Two flags are for maintainers and CI:
+
+- `agentparley doctor --pins <file>` skips every check above and runs only the codex and claude readiness probes
+  against an unsigned candidate pin list (see "Keeping the CLI pins current"). Exits 1 if either probe fails.
+- `agentparley doctor --bench-claude-replay 500,2000` times rebuilding a Claude Code session for histories of those
+  step counts and exits (see "Rebuild timings").
+
 ## Cutting a release (maintainers)
 
 A release is a git tag of the shape `tunnel-v<semver>`, e.g.:
@@ -185,7 +193,9 @@ git push origin tunnel-v1.4.2
 ```
 
 This fires `.github/workflows/release.yaml`, which cross-compiles amd64 + arm64 with the version stamped in via
-`-ldflags -X .../internal/version.Version=1.4.2`, writes each binary's `.sha256` sidecar, and uploads to the
+`-ldflags -X .../internal/version.Version=1.4.2`, writes each binary's `.sha256` sidecar and signs it
+(`.sha256.sig`, Ed25519, with the repository secret `RELEASE_SIGNING_KEY`; the daemon installs an update only when that
+signature verifies against the public key embedded in `internal/managedcli/pinkey.go`), and uploads to the
 bucket behind `get.agentparley.ai` —
 the versioned artifacts first, `latest-version` last, so a box can never observe a half-published release. Every
 release folder (`releases/<version>/`) is kept forever; only `latest-version` moves.
@@ -240,9 +250,10 @@ allow_harnesses: []   # empty = all four harnesses considered (subject to detect
 deny_harnesses: []    # e.g. ["codex"] to keep the codex harness off even if installed — deny always beats allow
 harnesses:
   codex:
-    command: /home/deploy/.npm-global/bin/codex   # optional override; `register` finds this itself otherwise
+    max_warm_sessions: 32          # optional; chats kept warm at once (default 32 for codex, 8 for claude)
+    warm_idle_minutes: 30          # optional; a warm chat idle this long is closed (default 30)
   claude:
-    command: claude                # optional override; defaults to "claude", auto-discovered by `register`
+    max_warm_sessions: 4           # e.g. on a small box: each warm Claude Code chat is a ~300 MB process
   ollama:
     url: http://localhost:11434    # this is the built-in default; only needed to override
   openai-compatible-local:
@@ -263,35 +274,82 @@ glob matching, against the harness name (`codex`, `claude`, `ollama`, `openai-co
 
 ## Registering local model harnesses
 
-`agentparley register` (no argument) is how you expose this box's own local models — a signed-in codex or
-claude CLI, a running Ollama, or an OpenAI-compatible server (LM Studio, vLLM, llama.cpp) — to AgentParley as
-Providers your agents can pick. Run it once as the box's `run_as` user (`sudo -u <run_as> agentparley
-register`, or plain `agentparley register` if you're already that user) any time you install or update a
-local harness; it is safe to re-run.
+`agentparley register` (no argument) is how you expose this box's own local models — Codex, Claude Code, a running
+Ollama, or an OpenAI-compatible server (LM Studio, vLLM, llama.cpp) — to AgentParley as Providers your agents can
+pick. Run it once as the box's `run_as` user (`sudo -u <run_as> agentparley register`, or plain `agentparley
+register` if you're already that user); it is safe to re-run.
 
 It scans all four harnesses in order and prints one line per harness:
 
 ```
 ✓ codex                    registered — Codex (ChatGPT account default)
 ✓ ollama                   registered — 3 models
-✗ claude                   installed but not ready: claude CLI version "2.0.9" is older than the minimum 2.1.207 ...
+✗ claude                   installed but not ready: Claude Code did not start. Its screen showed: ...
 – openai-compatible-local  not found
 ```
 
-`✓` registered, `✗` found but not ready (a real problem — an old CLI version, a signed-out account, a server
-returning malformed models), `–` not found or excluded by `allow_harnesses`/`deny_harnesses` on this box — the
-ordinary case for whichever of the four you don't run. The command exits non-zero only when NOTHING registered and
-at least one harness genuinely failed; a box with no local model providers at all exits 0.
+`✓` registered, `✗` found but not ready (a real problem — a signed-out account, a server returning malformed
+models), `–` not found or excluded by `allow_harnesses`/`deny_harnesses` on this box — the ordinary case for
+whichever of the four you don't run. The command exits non-zero only when NOTHING registered and at least one
+harness genuinely failed; a box with no local model providers at all exits 0.
 
 `register <harness>` does the same for just that one harness. `unregister <harness>` removes it again.
 
-**Why config.yaml is usually unnecessary:** a codex/claude CLI installed under your own login shell (nvm,
-`~/.npm-global`, homebrew) is invisible to `sudo -u <run_as> agentparley register` and to the systemd
-service itself — both run with a stripped-down PATH that never sees where an interactive terminal finds it.
-`register` works around this by asking the `run_as` user's own login shell where the binary lives (and what PATH it
-needs, e.g. for a `codex`/`claude` installed as a `#!/usr/bin/env node` script) and remembers the answer — no
-config.yaml edit, no daemon restart. An explicit `harnesses.<name>.command`/`.url` in config.yaml always overrides
-whatever `register` found.
+### Codex and Claude Code run as the daemon's own copies
+
+`register codex` and `register claude` set up a CLI that belongs to the daemon, not to you:
+
+- **A pinned build.** The daemon downloads the exact Codex or Claude Code version named by its signed pin list
+  from the vendor's official download URL, checks the SHA-256 against the list, and runs that copy. Your own
+  `codex` or `claude` (and its auto-updates) are never used and never touched.
+- **A private configuration folder and a login of its own.** `register` asks you to sign in once (`codex login
+  --device-auth`, or `claude setup-token`, which needs a Claude subscription). The login lives under the daemon's
+  state folder, so there are no shared refresh tokens that sign you out at random, no sessions or memories written
+  into your own `~/.codex` or `~/.claude`, and nothing of yours leaks into AgentParley's chats.
+- **Only AgentParley's tools.** Each chat's model sees the tools AgentParley lists for that step as real native
+  tools, and nothing else: Codex runs as `codex app-server` with its own tools switched off, and Claude Code runs
+  with no built-in tool at all. Anything the CLI tries on its own (a shell command, a file edit, a slash command)
+  is refused and shown in the chat's work block. Claude Code replaces any tool result longer than 50,000 characters
+  with a short preview and the path of a file the model cannot read, so the daemon cuts such a result itself (at
+  49,000 characters, with a note saying how much was left out) and the model keeps the first part.
+- **Warm sessions.** A chat keeps its CLI session open between steps (one Codex thread, one Claude Code process),
+  so the model's prompt cache is reused. If the chat's history stops matching what the session has seen (an edit,
+  a compaction, a restart, or 30 idle minutes), the session is rebuilt from AgentParley's history on the next step.
+  `max_warm_sessions` and `warm_idle_minutes` size this per harness; when the box is full the least recently used
+  idle chat is closed first.
+- **Claude Code is driven through a small extension.** The daemon starts Claude Code in a terminal of its own and
+  never types into it. A mod that ships inside the daemon registers the step's tools, replaces the system prompt,
+  and passes every model step and tool call to the daemon over a private unix socket.
+
+### Keeping the CLI pins current
+
+The pin list is embedded in the daemon (`internal/managedcli/cli-pins.json`) and refreshed every six hours from a
+signed copy at `<update_server>/tunnel/cli-pins.json` (+ `.sig`, an Ed25519 signature by the release key). A fetched
+list is accepted only when its signature verifies and its serial is higher than the current one. A daily CI job
+(`.github/workflows/cli-pins.yaml`) looks for newer builds, signs both CLIs in with test logins, runs `agentparley
+doctor --pins` against the candidate list, and opens a pull request when the probes pass (an issue when they fail or
+cannot run). Merging the pull request publishes the signed list. A box keeps running warm sessions on the old build
+until they close; new sessions start on the new one.
+
+### Rebuild timings
+
+A Claude Code session that has to be rebuilt (the first step on a box, or after the history stopped matching)
+replays at most the last 64 steps of the open turn with their real tool calls, as made-up steps Claude Code answers
+without a model call, and receives everything before them as a record. `agentparley doctor --bench-claude-replay
+500,2000` measures that path against a local stand-in for the API, so no login and no model call is involved. It
+times starting Claude Code (`start`), handing it the record (`seed`), and replaying the window (`window`), for a
+history of all closed turns and for one long open turn. Measured on the pinned build (2.1.296, linux/amd64, 1 KiB per
+tool result):
+
+| shape | steps | start | seed | window | total |
+| --- | --- | --- | --- | --- | --- |
+| closed turns | 500 | 520 ms | 20 ms | 170 ms | 0.70 s |
+| one open turn | 500 | 470 ms | 10 ms | 830 ms | 1.31 s |
+| closed turns | 2000 | 460 ms | 30 ms | 170 ms | 0.65 s |
+| one open turn | 2000 | 490 ms | 20 ms | 1.03 s | 1.55 s |
+
+The cost depends on the window (64 steps), not on the length of the chat. These numbers leave out the first real
+model request after the rebuild, whose time depends on the model and on how large the context is.
 
 ## State this daemon owns on disk
 
@@ -299,7 +357,12 @@ whatever `register` found.
 | --- | --- | --- |
 | `/etc/agentparley/config.yaml` | policy config | 0644 |
 | `/var/lib/agentparley/credentials.json` | refresh token + Ed25519 key — durable identity, survives a reboot on purpose | 0600, in a 0700 dir |
-| `/var/lib/agentparley/harnesses.json` | what `register` auto-discovered per harness (a CLI's absolute path + PATH, or a local server's URL) — merged in under config.yaml, never overriding an explicit value there | 0600, in a 0700 dir |
+| `/var/lib/agentparley/harnesses.json` | what `register` auto-discovered per harness (a local server's URL, or an empty entry for a CLI the daemon runs itself) — merged in under config.yaml, never overriding an explicit value there | 0600, in a 0700 dir |
+| `/var/lib/agentparley/cli/bin/<name>-<version>/` | the daemon's pinned copy of Codex or Claude Code, checksum-verified; old versions are deleted at daemon start | 0700 dir |
+| `/var/lib/agentparley/cli/claude-home/`, `cli/codex-home/` | the private configuration folders (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) the daemon runs each CLI with — never `~/.claude` or `~/.codex` | 0700 |
+| `/var/lib/agentparley/cli/claude-oauth-token` | the daemon's own Claude Code login token (from `claude setup-token`); `unregister claude` deletes it | 0600 |
+| `/var/lib/agentparley/cli/pins.json` (+ `.sig`) | the last signed pin list this box accepted | 0600 |
+| `/var/lib/agentparley/claude-mod/<hash>/` | the Claude Code mod, written from the daemon binary at start; one folder per version of the mod | 0700 |
 
 Everything below is deliberately **NOT** on persistent disk — a captured session environment can contain secrets
 (an `AWS_SECRET_ACCESS_KEY`, a database password), so both the ledger and the shell state it describes live under a
@@ -310,4 +373,6 @@ only when neither tmpfs option is available.
 | Path (relative to the resolved tmpfs root) | Contents | Mode |
 | --- | --- | --- |
 | `ledger/` | which AgentParley session ids this daemon has already served (so a restart still reports "fresh" correctly for a truly-new session, and "resumed" for one it already saw) | 0700 |
+| `claude/` | the Claude Code working folder (`cwd/`) and the private unix sockets the mod talks to (`<pid>-<n>.sock`) | 0700 |
+| `codex/` | the folder the Codex app-server runs in | 0700 |
 | `sessions/{sessionId}-{generation}/` | the actual per-session shell state (working directory, exported environment, command history) — `generation` is `Session.ShellStateGeneration`, currently always 0 | written entirely by the wrapped shell text the platform sends — this daemon never reads or writes these files itself, except to delete the whole directory once its ledger entry ages out |

@@ -201,3 +201,22 @@ func writeFileAtomic(path string, data []byte) error {
 	}
 	return os.Rename(tempPath, path)
 }
+
+// NewFixedRefresher serves one manifest and never fetches: `doctor --pins` uses it to try a candidate pin list.
+func NewFixedRefresher(manifest Manifest, logger *log.Logger) *Refresher {
+	return &Refresher{
+		updateServer: config.DefaultUpdateServer,
+		logger:       logger,
+		nudge:        make(chan struct{}, 1),
+		current:      manifest,
+	}
+}
+
+// ReadManifestFile reads an unsigned pin list from disk, the format CI hands to `doctor --pins`.
+func ReadManifestFile(path string) (Manifest, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return Manifest{}, err
+	}
+	return parseManifest(body)
+}

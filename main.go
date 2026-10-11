@@ -292,10 +292,25 @@ func runRegister(args []string) error {
 
 // isManagedCLI reports whether the daemon runs its own pinned copy of this CLI with its own login.
 func isManagedCLI(harnessName string) bool {
-	return harnessName == harness.Codex
+	return harnessName == harness.Codex || harnessName == harness.Claude
 }
 
-// registerManagedCLI is `register codex`: install the pinned build, sign the daemon's own login in when there is none,
+// signInManagedCLI runs the CLI's own sign-in as the run_as user, attached to this terminal.
+func signInManagedCLI(ctx context.Context, harnessName, binary string) error {
+	if harnessName == harness.Claude {
+		return cliauth.LoginClaude(ctx, binary, os.Stdin)
+	}
+	return cliauth.LoginCodex(ctx, binary, os.Stdin)
+}
+
+func hasManagedCLILogin(harnessName string) bool {
+	if harnessName == harness.Claude {
+		return cliauth.HasClaudeLogin()
+	}
+	return cliauth.HasCodexLogin()
+}
+
+// registerManagedCLI is `register codex|claude`: install the pinned build, sign the daemon's own login in when there is none,
 // prove the CLI works through the real probe, and tell the console about the models.
 func registerManagedCLI(tunnelConfig *config.Config, credentials *credstore.Credentials, runAsUser *shellrun.User, harnessName string) error {
 	ctx := context.Background()
@@ -310,9 +325,9 @@ func registerManagedCLI(tunnelConfig *config.Config, credentials *credstore.Cred
 		return fail("could not install the pinned build: %v", err)
 	}
 
-	if !cliauth.HasCodexLogin() {
+	if !hasManagedCLILogin(harnessName) {
 		fmt.Printf("Signing %s in for AgentParley (a separate login from your own %s)…\n", harnessName, harnessName)
-		if err := cliauth.LoginCodex(ctx, binary, os.Stdin); err != nil {
+		if err := signInManagedCLI(ctx, harnessName, binary); err != nil {
 			return fail("sign-in did not finish: %v", err)
 		}
 	}
