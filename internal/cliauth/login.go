@@ -114,8 +114,7 @@ var tokenRunPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+`)
 
 // LoginCodex runs the pinned `codex login --device-auth` with CODEX_HOME set, attached straight to the terminal.
 func LoginCodex(ctx context.Context, binary string, term *os.File) error {
-	command := exec.CommandContext(ctx, binary, "login", "--device-auth")
-	command.Env = append(os.Environ(), "CODEX_HOME="+CodexHome())
+	command := CodexCommand(ctx, binary, "login", "--device-auth")
 	command.Stdin, command.Stdout, command.Stderr = term, term, term
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("codex login failed: %w", err)

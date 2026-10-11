@@ -15,9 +15,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/agentparley/tunnel/internal/cliround"
 	"github.com/agentparley/tunnel/internal/config"
-	"github.com/agentparley/tunnel/internal/managedcli"
 )
 
 // These names are the wire vocabulary shared with AgentParley.Cloud.Domain's TunnelHarnessNames and the proto's
@@ -70,10 +68,10 @@ type Harness interface {
 // local file read, cheap enough to skip caching — merging whatever `register` found in under whatever config.yaml
 // already says (config always wins; see withDiscoveredURL).
 //
-// cliSessions and pins are the daemon's warm CLI sessions and managed CLI builds. A caller outside the running
-// daemon (register, doctor) passes nil for both: the harness then reads the persisted or embedded pin list and can
-// run its Detect probe, but not a conversation round.
-func Resolve(harnessName string, tunnelConfig *config.Config, cliSessions *cliround.Manager, pins *managedcli.Refresher) (Harness, error) {
+// cli holds the daemon's warm CLI sessions, drivers and managed CLI builds. A caller outside the running daemon
+// (register, doctor) passes the zero value, or only the pins: the harness then reads the persisted or embedded pin
+// list and can run its Detect probe, but not a conversation round.
+func Resolve(harnessName string, tunnelConfig *config.Config, cli CLIDeps) (Harness, error) {
 	harnessConfig := tunnelConfig.Harnesses[harnessName]
 	discoveries, err := loadDiscoveries()
 	if err != nil {
@@ -83,9 +81,9 @@ func Resolve(harnessName string, tunnelConfig *config.Config, cliSessions *cliro
 
 	switch harnessName {
 	case Codex:
-		return newCodexHarness(harnessConfig, cliSessions, pins), nil
+		return newCodexHarness(harnessConfig, cli), nil
 	case Claude:
-		return newClaudeHarness(harnessConfig, cliSessions, pins), nil
+		return newClaudeHarness(harnessConfig, cli), nil
 	case Ollama:
 		return newOllamaHarness(withDiscoveredURL(harnessConfig, discovered)), nil
 	case OpenAICompatibleLocal:

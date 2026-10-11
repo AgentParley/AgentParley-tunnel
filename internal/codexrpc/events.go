@@ -43,7 +43,9 @@ func (t *Thread) onNotification(method string, params json.RawMessage) {
 	defer t.mutex.Unlock()
 
 	if method == "thread/tokenUsage/updated" {
-		t.addUsageLocked(params)
+		if err := t.addUsageLocked(params); err != nil {
+			t.malformedFrameLocked(method, err)
+		}
 		return
 	}
 	if t.closed {
@@ -60,7 +62,10 @@ func (t *Thread) onNotification(method string, params json.RawMessage) {
 				ID string `json:"id"`
 			} `json:"turn"`
 		}
-		_ = json.Unmarshal(params, &started)
+		if err := json.Unmarshal(params, &started); err != nil {
+			t.malformedFrameLocked(method, err)
+			return
+		}
 		t.turnID = started.Turn.ID
 		if t.round == nil {
 			t.offRoundLocked("turn started")
@@ -71,7 +76,10 @@ func (t *Thread) onNotification(method string, params json.RawMessage) {
 		var started struct {
 			Item threadItem `json:"item"`
 		}
-		_ = json.Unmarshal(params, &started)
+		if err := json.Unmarshal(params, &started); err != nil {
+			t.malformedFrameLocked(method, err)
+			return
+		}
 		if t.round == nil && started.Item.Type != "userMessage" && started.Item.Type != "dynamicToolCall" {
 			t.offRoundLocked("item " + started.Item.Type)
 		}
@@ -79,7 +87,10 @@ func (t *Thread) onNotification(method string, params json.RawMessage) {
 		var completed struct {
 			Item threadItem `json:"item"`
 		}
-		_ = json.Unmarshal(params, &completed)
+		if err := json.Unmarshal(params, &completed); err != nil {
+			t.malformedFrameLocked(method, err)
+			return
+		}
 		t.onItemCompletedLocked(completed.Item)
 	case "error":
 		var failure struct {
@@ -88,14 +99,17 @@ func (t *Thread) onNotification(method string, params json.RawMessage) {
 			} `json:"error"`
 			WillRetry bool `json:"willRetry"`
 		}
-		_ = json.Unmarshal(params, &failure)
+		if err := json.Unmarshal(params, &failure); err != nil {
+			t.malformedFrameLocked(method, err)
+			return
+		}
 		if failure.WillRetry && t.round != nil {
 			t.round.events = append(t.round.events, cliround.Event{Kind: cliround.EventRecoveredError, Detail: failure.Error.Message})
 		}
 	}
 }
 
-func (t *Thread) addUsageLocked(params json.RawMessage) {
+func (t *Thread) addUsageLocked(params json.RawMessage) error {
 	var updated struct {
 		TokenUsage struct {
 			Last struct {
@@ -106,8 +120,8 @@ func (t *Thread) addUsageLocked(params json.RawMessage) {
 			} `json:"last"`
 		} `json:"tokenUsage"`
 	}
-	if json.Unmarshal(params, &updated) != nil {
-		return
+	if err := json.Unmarshal(params, &updated); err != nil {
+		return err
 	}
 	last := updated.TokenUsage.Last
 	usage := cliround.Usage{
@@ -119,9 +133,22 @@ func (t *Thread) addUsageLocked(params json.RawMessage) {
 	}
 	if t.round != nil {
 		t.round.usage.Add(usage)
-		return
+		return nil
 	}
 	t.carriedUsage.Add(usage)
+	return nil
+}
+
+// malformedFrameLocked makes a frame in a shape this code cannot read visible: it is logged, the thread is marked dirty
+// so the next round rebuilds it, and an open round fails instead of acting on a half-read frame.
+func (t *Thread) malformedFrameLocked(method string, err error) {
+	t.logger.Printf("codex: unreadable %s frame on thread %s: %v", method, t.id, err)
+	t.state = cliround.StateDirty
+	if t.round != nil {
+		t.finishLocked(t.round, "", &cliround.HarnessError{Message: "Codex sent a " + method + " message that AgentParley could not read"})
+		return
+	}
+	t.carriedEvents = append(t.carriedEvents, cliround.Event{Kind: cliround.EventRecoveredError, Detail: "Codex sent a " + method + " message that AgentParley could not read"})
 }
 
 func (t *Thread) onItemCompletedLocked(item threadItem) {
@@ -170,9 +197,17 @@ func (t *Thread) onTurnCompletedLocked(params json.RawMessage) {
 			} `json:"error"`
 		} `json:"turn"`
 	}
-	_ = json.Unmarshal(params, &completed)
+	if err := json.Unmarshal(params, &completed); err != nil {
+		t.interrupting = false
+		t.malformedFrameLocked("turn/completed", err)
+		return
+	}
 	current := t.round
 	if current == nil {
+		if t.interrupting {
+			t.interrupting = false
+			return
+		}
 		t.offRoundLocked("turn completed")
 		return
 	}
@@ -199,7 +234,7 @@ func (t *Thread) onTurnCompletedLocked(params json.RawMessage) {
 // AgentParley's history, so it is marked dirty and the next round rebuilds it.
 func (t *Thread) offRoundLocked(what string) {
 	t.state = cliround.StateDirty
-	if t.offRoundLogged {
+	if t.interrupting || t.offRoundLogged {
 		return
 	}
 	t.offRoundLogged = true

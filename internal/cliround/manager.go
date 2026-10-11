@@ -48,17 +48,23 @@ type Factory func(ctx context.Context, model string, request *Request, budgets B
 // OneShot runs a round that has no conversation: no session is kept and no fence applies.
 type OneShot func(ctx context.Context, model string, request *Request) (*Result, error)
 
+// Deliver hands a finished round's result on towards Platform. The manager keeps the usage it carried into the result
+// until Deliver succeeds.
+type Deliver func(result *Result) error
+
 type Limits struct {
-	MaxWarm   int
-	IdleLimit time.Duration
+	MaxWarm    int
+	MaxOneShot int
+	IdleLimit  time.Duration
 }
 
 const (
 	defaultMaxWarm     = 8
+	defaultMaxOneShot  = 4
 	defaultIdleLimit   = 30 * time.Minute
 	maxRebuildBudget   = 180 * time.Second
 	maxStepBudget      = 600 * time.Second
-	fallbackRemaining  = 780 * time.Second
+	fallbackRemaining  = maxRebuildBudget + maxStepBudget
 	slotWait           = 30 * time.Second
 	tombstoneTTL       = 24 * time.Hour
 	errShuttingDownMsg = "the daemon is shutting down"
@@ -92,19 +98,23 @@ type Manager struct {
 	logger *log.Logger
 	limits map[string]Limits
 
-	mutex  sync.Mutex
-	tables map[string]*table
-	closed bool
+	mutex    sync.Mutex
+	tables   map[string]*table
+	oneShots map[string]chan struct{}
+	closed   bool
 }
 
 func NewManager(limits map[string]Limits, logger *log.Logger) *Manager {
-	return &Manager{logger: logger, limits: limits, tables: map[string]*table{}}
+	return &Manager{logger: logger, limits: limits, tables: map[string]*table{}, oneShots: map[string]chan struct{}{}}
 }
 
 func (m *Manager) limitsFor(harness string) Limits {
 	limits := m.limits[harness]
 	if limits.MaxWarm <= 0 {
 		limits.MaxWarm = defaultMaxWarm
+	}
+	if limits.MaxOneShot <= 0 {
+		limits.MaxOneShot = defaultMaxOneShot
 	}
 	if limits.IdleLimit <= 0 {
 		limits.IdleLimit = defaultIdleLimit
@@ -135,13 +145,15 @@ func (e *entry) release() {
 }
 
 // Round runs one round. A conversation round is fenced: a lower fence than one already seen is superseded at once,
-// and a fence at least as high aborts a round still running for that conversation.
-func (m *Manager) Round(ctx context.Context, harness, model string, request *Request, factory Factory, oneShot OneShot) (*Result, error) {
+// and a fence at least as high aborts a round still running for that conversation. A round the manager cannot admit
+// (every warm slot busy, or every one-shot slot) ends with ErrBusy after a short wait: the manager is the only place
+// that answers it.
+func (m *Manager) Round(ctx context.Context, harness, model string, request *Request, factory Factory, oneShot OneShot, deliver Deliver) error {
 	if request.Conversation == "" {
-		return oneShot(ctx, model, request)
+		return m.runOneShot(ctx, harness, model, request, oneShot, deliver)
 	}
 	if request.Fence == nil {
-		return nil, &InvalidRequestError{Message: "conversation and fence must be given together"}
+		return &InvalidRequestError{Message: "conversation and fence must be given together"}
 	}
 	fence := *request.Fence
 
@@ -149,10 +161,10 @@ func (m *Manager) Round(ctx context.Context, harness, model string, request *Req
 	for {
 		candidate, err := m.enter(harness, request.Conversation, fence)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if err := candidate.acquire(ctx); err != nil {
-			return nil, err
+			return err
 		}
 		m.mutex.Lock()
 		removed := candidate.removed
@@ -160,7 +172,7 @@ func (m *Manager) Round(ctx context.Context, harness, model string, request *Req
 		m.mutex.Unlock()
 		if superseded {
 			candidate.release()
-			return nil, ErrSuperseded
+			return ErrSuperseded
 		}
 		if removed {
 			candidate.release()
@@ -171,7 +183,41 @@ func (m *Manager) Round(ctx context.Context, harness, model string, request *Req
 	}
 	defer current.release()
 
-	return m.runRound(ctx, harness, model, request, factory, current)
+	return m.runRound(ctx, harness, model, request, factory, deliver, current)
+}
+
+func (m *Manager) runOneShot(ctx context.Context, harness, model string, request *Request, oneShot OneShot, deliver Deliver) error {
+	release, err := m.admitOneShot(ctx, harness)
+	if err != nil {
+		return err
+	}
+	defer release()
+	result, err := oneShot(ctx, model, request)
+	if err != nil {
+		return err
+	}
+	return deliver(result)
+}
+
+func (m *Manager) admitOneShot(ctx context.Context, harness string) (func(), error) {
+	m.mutex.Lock()
+	slots := m.oneShots[harness]
+	if slots == nil {
+		slots = make(chan struct{}, m.limitsFor(harness).MaxOneShot)
+		m.oneShots[harness] = slots
+	}
+	m.mutex.Unlock()
+
+	timer := time.NewTimer(slotWait)
+	defer timer.Stop()
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, nil
+	case <-timer.C:
+		return nil, ErrBusy
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	}
 }
 
 func (m *Manager) enter(harness, conversation string, fence int64) (*entry, error) {
@@ -200,102 +246,135 @@ func (m *Manager) enter(harness, conversation string, fence int64) (*entry, erro
 	return existing, nil
 }
 
-func (m *Manager) runRound(ctx context.Context, harness, model string, request *Request, factory Factory, current *entry) (*Result, error) {
+// roundState is what one round knows about the conversation's runner while it plans, rebuilds and retries.
+// holdsSlot means the round freed its own runner and keeps that warm slot reserved for the replacement.
+type roundState struct {
+	runner            Runner
+	plan              Plan
+	reason            RebuildReason
+	holdsSlot         bool
+	contextFullEvents []Event
+}
+
+func (m *Manager) runRound(ctx context.Context, harness, model string, request *Request, factory Factory, deliver Deliver, current *entry) error {
+	roundCtx, endRound := m.beginRound(ctx, current)
+	defer endRound()
+
+	state := m.planRound(current, FrameOf(model, request), request)
+	defer m.releaseHeldSlot(current, &state)
+
+	result, err := m.runSteps(roundCtx, harness, model, request, factory, current, &state)
+	if err != nil {
+		return m.failRound(roundCtx, current, &state, err)
+	}
+	if result == nil || state.runner == nil {
+		return &HarnessError{Message: "the CLI produced no result"}
+	}
+
+	result.RebuildReason = state.reason
+	if state.reason == RebuildNone {
+		result.RebuildMs = 0
+	}
+	m.finishRound(current, state.runner, request, result, state.contextFullEvents)
+	if err := deliver(result); err != nil {
+		m.markDirty(current)
+		return err
+	}
+	m.settleCarry(current, result)
+	m.logger.Printf("cli round: harness=%s conversation=%s outcome=%s rebuild=%s rebuildMs=%d", harness, request.Conversation, result.Outcome, result.RebuildReason, result.RebuildMs)
+	return nil
+}
+
+func (m *Manager) beginRound(ctx context.Context, current *entry) (context.Context, func()) {
 	roundCtx, cancel := context.WithCancelCause(ctx)
 	m.mutex.Lock()
 	current.cancelRound = cancel
 	m.mutex.Unlock()
-	defer func() {
+	return roundCtx, func() {
 		m.mutex.Lock()
 		current.cancelRound = nil
 		current.lastUsed = time.Now()
 		m.mutex.Unlock()
 		cancel(nil)
-	}()
+	}
+}
 
-	limits := m.limitsFor(harness)
-	frame := FrameOf(model, request)
-
-	reason := RebuildNone
-	var plan Plan
+// planRound keeps the warm runner when the request continues it, and otherwise swaps it out and says why.
+func (m *Manager) planRound(current *entry, frame Frame, request *Request) roundState {
 	m.mutex.Lock()
 	runner := current.runner
+	isDirty := current.dirty
 	m.mutex.Unlock()
-	if runner != nil {
-		usage, events := runner.TakeCarried()
-		m.addCarry(current, usage, events)
-		m.mutex.Lock()
-		isDirty := current.dirty
-		m.mutex.Unlock()
-		if isDirty || runner.State() == StateDirty {
-			m.dropRunner(current)
-			runner = nil
-			reason = RebuildDirty
-		} else {
-			sessionFrame := runner.Frame()
-			plan = Reconcile(frame, &sessionFrame, runner.Consumed(), request.Items)
-			if plan.Reason != RebuildNone {
-				m.dropRunner(current)
-				runner = nil
-				reason = plan.Reason
-			}
-		}
-	} else {
-		reason = RebuildNoSession
+	if runner == nil {
+		return roundState{reason: RebuildNoSession}
 	}
 
-	var result *Result
-	var err error
-	var contextFullEvents []Event
+	usage, events := runner.TakeCarried()
+	m.addCarry(current, usage, events)
+	if isDirty || runner.State() == StateDirty {
+		return roundState{reason: RebuildDirty, holdsSlot: m.replaceRunner(current)}
+	}
+	sessionFrame := runner.Frame()
+	plan := Reconcile(frame, &sessionFrame, runner.Consumed(), request.Items, request.ReplyDirectives)
+	if plan.Reason != RebuildNone {
+		return roundState{reason: plan.Reason, holdsSlot: m.replaceRunner(current)}
+	}
+	return roundState{runner: runner, plan: plan, reason: RebuildNone}
+}
+
+// runSteps extends the warm runner or rebuilds one, and rebuilds once more when the CLI's context fills up.
+func (m *Manager) runSteps(roundCtx context.Context, harness, model string, request *Request, factory Factory, current *entry, state *roundState) (*Result, error) {
+	limits := m.limitsFor(harness)
 	contextFullRetried := false
-	rebuildStarted := time.Now()
 	for {
-		budgets, budgetErr := budgetsFor(roundCtx)
-		if budgetErr != nil {
-			err = budgetErr
-			break
+		budgets, err := budgetsFor(roundCtx)
+		if err != nil {
+			return nil, err
 		}
-		if runner != nil {
-			result, err = m.extend(roundCtx, runner, plan, request, budgets.Step)
+		var result *Result
+		if state.runner != nil {
+			result, err = m.extend(roundCtx, state.runner, state.plan, request, budgets.Step)
 		} else {
-			rebuildStarted = time.Now()
-			runner, result, err = m.rebuild(roundCtx, harness, limits, current, model, request, factory, budgets)
+			state.runner, result, err = m.rebuild(roundCtx, limits, current, model, request, factory, budgets, state.holdsSlot)
+			state.holdsSlot = false
 		}
 		if errors.Is(err, ErrContextFull) && !contextFullRetried {
 			contextFullRetried = true
-			m.dropRunner(current)
-			runner = nil
-			reason = RebuildContextFull
-			contextFullEvents = append(contextFullEvents, Event{Kind: EventContextFull, Detail: "the CLI's context filled up, so the session was rebuilt"})
+			state.holdsSlot = m.replaceRunner(current)
+			state.runner = nil
+			state.reason = RebuildContextFull
+			state.contextFullEvents = append(state.contextFullEvents, Event{Kind: EventContextFull, Detail: "the CLI's context filled up, so the session was rebuilt"})
 			continue
 		}
-		break
+		return result, err
 	}
+}
 
-	if err != nil {
-		if runner != nil {
-			m.mutex.Lock()
-			current.dirty = true
-			m.mutex.Unlock()
-		}
-		if errors.Is(context.Cause(roundCtx), ErrSuperseded) {
-			return nil, ErrSuperseded
-		}
-		return nil, err
+func (m *Manager) failRound(roundCtx context.Context, current *entry, state *roundState, err error) error {
+	if state.runner != nil {
+		m.markDirty(current)
 	}
-	if result == nil || runner == nil {
-		return nil, &HarnessError{Message: "the CLI produced no result"}
+	if errors.Is(context.Cause(roundCtx), ErrSuperseded) {
+		return ErrSuperseded
 	}
+	return err
+}
 
-	result.RebuildReason = reason
-	if reason == RebuildNone {
-		result.RebuildMs = 0
-	} else if result.RebuildMs == 0 {
-		result.RebuildMs = time.Since(rebuildStarted).Milliseconds()
+func (m *Manager) markDirty(current *entry) {
+	m.mutex.Lock()
+	current.dirty = true
+	m.mutex.Unlock()
+}
+
+func (m *Manager) releaseHeldSlot(current *entry, state *roundState) {
+	if !state.holdsSlot {
+		return
 	}
-	m.finishRound(current, runner, request, result, contextFullEvents)
-	m.logger.Printf("cli round: harness=%s conversation=%s outcome=%s rebuild=%s rebuildMs=%d", harness, request.Conversation, result.Outcome, result.RebuildReason, result.RebuildMs)
-	return result, nil
+	state.holdsSlot = false
+	m.mutex.Lock()
+	current.table.reserved--
+	m.freeSlotLocked(current.table)
+	m.mutex.Unlock()
 }
 
 func (m *Manager) finishRound(current *entry, runner Runner, request *Request, result *Result, extraEvents []Event) {
@@ -322,6 +401,16 @@ func (m *Manager) finishRound(current *entry, runner Runner, request *Request, r
 	result.Usage.Add(current.carriedUsage)
 	merged := append(append([]Event{}, current.carriedEvents...), extraEvents...)
 	result.Events = append(merged, result.Events...)
+}
+
+// settleCarry forgets the usage and events the delivered result carried. A refused result is thrown away by Platform,
+// so its carry stays for the conversation's next round.
+func (m *Manager) settleCarry(current *entry, result *Result) {
+	if result.Outcome == OutcomeRefused {
+		return
+	}
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 	current.carriedUsage = Usage{}
 	current.carriedEvents = nil
 }
@@ -336,9 +425,11 @@ func (m *Manager) extend(ctx context.Context, runner Runner, plan Plan, request 
 	return result, err
 }
 
-func (m *Manager) rebuild(ctx context.Context, harness string, limits Limits, current *entry, model string, request *Request, factory Factory, budgets Budgets) (Runner, *Result, error) {
-	if err := m.reserveSlot(ctx, current.table, limits, current); err != nil {
-		return nil, nil, err
+func (m *Manager) rebuild(ctx context.Context, limits Limits, current *entry, model string, request *Request, factory Factory, budgets Budgets, holdsSlot bool) (Runner, *Result, error) {
+	if !holdsSlot {
+		if err := m.reserveSlot(ctx, current.table, limits, current); err != nil {
+			return nil, nil, err
+		}
 	}
 	started := time.Now()
 	runner, result, err := factory(ctx, model, request, budgets)
@@ -383,20 +474,34 @@ func (m *Manager) addCarry(current *entry, usage Usage, events []Event) {
 	current.carriedEvents = append(current.carriedEvents, events...)
 }
 
-// dropRunner closes the entry's runner and keeps whatever usage the close flushed for the conversation's next round.
-// The caller holds the entry's lock.
+// dropRunner closes the entry's runner, frees its warm slot and keeps whatever usage the close flushed for the
+// conversation's next round. The caller holds the entry's lock.
 func (m *Manager) dropRunner(current *entry) {
+	m.detachRunner(current, false)
+}
+
+// replaceRunner is dropRunner for a round that is about to rebuild: the warm slot stays reserved for the rebuild, so a
+// chat waiting for a slot cannot take it in between. It reports whether a slot is now held.
+func (m *Manager) replaceRunner(current *entry) bool {
+	return m.detachRunner(current, true)
+}
+
+func (m *Manager) detachRunner(current *entry, keepSlot bool) bool {
 	m.mutex.Lock()
 	runner := current.runner
 	current.runner = nil
 	current.dirty = false
 	if runner != nil {
 		current.table.live--
-		m.freeSlotLocked(current.table)
+		if keepSlot {
+			current.table.reserved++
+		} else {
+			m.freeSlotLocked(current.table)
+		}
 	}
 	m.mutex.Unlock()
 	if runner == nil {
-		return
+		return false
 	}
 	usage, events := runner.TakeCarried()
 	flushed, err := runner.Close()
@@ -405,6 +510,7 @@ func (m *Manager) dropRunner(current *entry) {
 	}
 	usage.Add(flushed)
 	m.addCarry(current, usage, events)
+	return keepSlot
 }
 
 func (m *Manager) freeSlotLocked(conversations *table) {

@@ -5,9 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,8 +21,10 @@ const (
 	maxLoggedLine     = 500
 )
 
-// disabledFeatures switches off every native Codex tool. code_mode and code_mode_host stay on: the gpt-5.6 models
-// are code-mode-only, and AgentParley's tools bypass code mode through direct_only_tool_namespaces instead.
+// disabledFeatures switches off every native Codex tool. code_mode stays on because the gpt-5.6 models are
+// code-mode-only. The pinned build ships no code-mode host on purpose, so the model calls AgentParley's tools directly;
+// direct_only_tool_namespaces is belt and braces. Codex's "Code Mode is unavailable" warning is therefore expected and
+// only logged, never reported as a harness event.
 var disabledFeatures = []string{
 	"shell_tool", "unified_exec", "multi_agent", "goals", "view_image", "image_generation", "apps", "plugins",
 	"browser_use", "computer_use", "tool_suggest", "skill_search", "memories",
@@ -55,9 +55,7 @@ type server struct {
 }
 
 func startServer(ctx context.Context, binary string, logger *log.Logger) (*server, error) {
-	command := exec.Command(binary, appServerArgs()...)
-	command.Dir = cliauth.CodexWorkDir()
-	command.Env = append(withoutEnv(os.Environ(), "CODEX_HOME"), "CODEX_HOME="+cliauth.CodexHome())
+	command := cliauth.CodexCommand(context.Background(), binary, appServerArgs()...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 
 	stdin, err := command.StdinPipe()
@@ -110,22 +108,14 @@ func startServer(ctx context.Context, binary string, logger *log.Logger) (*serve
 	return running, nil
 }
 
-func withoutEnv(environment []string, name string) []string {
-	kept := make([]string, 0, len(environment))
-	for _, entry := range environment {
-		if !strings.HasPrefix(entry, name+"=") {
-			kept = append(kept, entry)
-		}
-	}
-	return kept
-}
-
+// alive is false from the moment the client sees the app-server's output close, which is before the process has been
+// waited for.
 func (s *server) alive() bool {
 	select {
 	case <-s.exited:
 		return false
 	default:
-		return true
+		return !s.client.hasExited()
 	}
 }
 
@@ -157,24 +147,6 @@ func NewDriver(manifest func() managedcli.Manifest, logger *log.Logger) *Driver 
 	return &Driver{manifest: manifest, logger: logger}
 }
 
-var (
-	sharedOnce   sync.Once
-	sharedDriver *Driver
-)
-
-// Shared is the daemon's one driver; the first caller's manifest source and logger are kept.
-func Shared(manifest func() managedcli.Manifest, logger *log.Logger) *Driver {
-	sharedOnce.Do(func() { sharedDriver = NewDriver(manifest, logger) })
-	return sharedDriver
-}
-
-// Shutdown stops the shared driver's app-server, if one was started.
-func Shutdown() {
-	if sharedDriver != nil {
-		sharedDriver.Shutdown()
-	}
-}
-
 func (d *Driver) Shutdown() {
 	d.mutex.Lock()
 	running := d.running
@@ -186,14 +158,18 @@ func (d *Driver) Shutdown() {
 }
 
 func (d *Driver) serverFor(ctx context.Context) (*server, error) {
-	d.mutex.Lock()
-	defer d.mutex.Unlock()
-	if d.running != nil && d.running.alive() {
-		return d.running, nil
+	if running := d.liveServer(); running != nil {
+		return running, nil
 	}
 	binary, _, err := managedcli.Ensure(ctx, d.manifest(), "codex")
 	if err != nil {
 		return nil, err
+	}
+
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	if d.running != nil && d.running.alive() {
+		return d.running, nil
 	}
 	running, err := startServer(ctx, binary, d.logger)
 	if err != nil {
@@ -201,4 +177,13 @@ func (d *Driver) serverFor(ctx context.Context) (*server, error) {
 	}
 	d.running = running
 	return running, nil
+}
+
+func (d *Driver) liveServer() *server {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	if d.running != nil && d.running.alive() {
+		return d.running
+	}
+	return nil
 }

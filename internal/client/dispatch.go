@@ -41,7 +41,7 @@ const (
 	errorCodeHarnessFailed         = "harness_failed"
 )
 
-// Mirrors AgentParley.Cloud.Domain/Ssh/SshEgressLimits.cs's HarnessInvokeTimeoutSeconds. A CLI round's deadline is
+// Mirrors backend/Libs/Ssh/Default/SshEgressLimits.cs's HarnessInvokeTimeoutSeconds. A CLI round's deadline is
 // SshEgressLimits.CliRoundTimeoutSeconds (780: one model step plus a bounded rebuild); it arrives as
 // operation.TimeoutSeconds, so this default only applies to the server family.
 const defaultHarnessInvokeTimeoutSeconds = 600
@@ -269,14 +269,17 @@ func (d *Daemon) dispatchInvokeHarness(ctx context.Context, correlationID string
 	invokeCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
-	resolvedHarness, err := harness.Resolve(call.GetHarness(), d.tunnelConfig, d.cliSessions, d.pins)
+	resolvedHarness, err := harness.Resolve(call.GetHarness(), d.tunnelConfig, harness.CLIDeps{Sessions: d.cliSessions, Pins: d.pins, Drivers: d.cliDrivers})
 	if err != nil {
 		return errorMessage(correlationID, errorCodeHarnessUnavailable, err.Error())
 	}
 
 	outcome, err := resolvedHarness.Invoke(invokeCtx, call.GetModel(), call.GetPayload())
 	if err != nil {
-		return d.harnessErrorMessage(invokeCtx, correlationID, timeoutSeconds, err)
+		if errors.Is(err, cliround.ErrUpdateRequired) {
+			d.pins.RefreshNow()
+		}
+		return harnessErrorMessage(invokeCtx, correlationID, timeoutSeconds, err)
 	}
 
 	return &tunnelpb.AgentMessage{Kind: &tunnelpb.AgentMessage_Result{Result: &tunnelpb.OperationResult{
@@ -291,7 +294,7 @@ func (d *Daemon) dispatchInvokeHarness(ctx context.Context, correlationID string
 }
 
 // harnessErrorMessage turns an Invoke failure into the OperationError code SshEgressErrorCodes.cs names for it.
-func (d *Daemon) harnessErrorMessage(invokeCtx context.Context, correlationID string, timeoutSeconds int, err error) *tunnelpb.AgentMessage {
+func harnessErrorMessage(invokeCtx context.Context, correlationID string, timeoutSeconds int, err error) *tunnelpb.AgentMessage {
 	var harnessErr *cliround.HarnessError
 	var invalidRequestErr *cliround.InvalidRequestError
 	switch {
@@ -304,7 +307,6 @@ func (d *Daemon) harnessErrorMessage(invokeCtx context.Context, correlationID st
 	case errors.Is(err, cliround.ErrUsageLimit):
 		return errorMessage(correlationID, errorCodeHarnessUsageLimit, err.Error())
 	case errors.Is(err, cliround.ErrUpdateRequired):
-		d.pins.RefreshNow()
 		return errorMessage(correlationID, errorCodeHarnessUpdateRequired, err.Error())
 	case errors.Is(err, cliround.ErrContextFull):
 		return errorMessage(correlationID, errorCodeHarnessContextFull, err.Error())

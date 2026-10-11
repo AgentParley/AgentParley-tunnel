@@ -66,6 +66,12 @@ func newClient(writer io.Writer, logger *log.Logger) *client {
 	return &client{logger: logger, writer: writer, pending: map[string]chan response{}, threads: map[string]threadSink{}}
 }
 
+func (c *client) hasExited() bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.exited != nil
+}
+
 func (c *client) write(value any) error {
 	encoded, err := json.Marshal(value)
 	if err != nil {

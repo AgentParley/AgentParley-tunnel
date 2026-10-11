@@ -70,6 +70,7 @@ type Thread struct {
 	carriedEvents  []cliround.Event
 	closed         bool
 	offRoundLogged bool
+	interrupting   bool
 }
 
 func (d *Driver) startThread(ctx context.Context, running *server, model string, request *cliround.Request, withTools bool) (*Thread, error) {
@@ -273,10 +274,29 @@ func (t *Thread) runRound(ctx context.Context, kick func(current *round) error) 
 	}
 }
 
+// abortRound ends a round that timed out or failed to start. An open turn is interrupted in the background so the
+// reply is not held up, and so Codex stops making model requests on the owner's subscription.
 func (t *Thread) abortRound(current *round) {
 	t.mutex.Lock()
-	defer t.mutex.Unlock()
 	t.endRoundWithErrorLocked(current)
+	turnID := t.turnID
+	interrupt := turnID != "" && !t.closed
+	t.interrupting = interrupt
+	t.mutex.Unlock()
+	if interrupt {
+		go t.interruptTurn(turnID)
+	}
+}
+
+func (t *Thread) interruptTurn(turnID string) {
+	if !t.server.alive() {
+		return
+	}
+	interruptCtx, cancel := context.WithTimeout(context.Background(), closeInterruptWait)
+	defer cancel()
+	if err := t.client.call(interruptCtx, "turn/interrupt", map[string]any{"threadId": t.id, "turnId": turnID}, nil); err != nil {
+		t.logger.Printf("codex: interrupting turn %s of thread %s: %v", turnID, t.id, err)
+	}
 }
 
 func (t *Thread) endRoundWithErrorLocked(current *round) {

@@ -314,7 +314,7 @@ func doctorProviders(tunnelConfig *config.Config, configErr error, runAsUser *sh
 			continue
 		}
 
-		resolvedHarness, err := harness.Resolve(name, tunnelConfig, nil, nil)
+		resolvedHarness, err := harness.Resolve(name, tunnelConfig, harness.CLIDeps{})
 		if err != nil {
 			anyFailed = true
 			printCheck("✗", name, err.Error())
@@ -396,7 +396,7 @@ func doctorPinList(pins *managedcli.Refresher) error {
 	probeConfig := &config.Config{}
 	failed := false
 	for _, name := range []string{harness.Codex, harness.Claude} {
-		resolvedHarness, err := harness.Resolve(name, probeConfig, nil, pins)
+		resolvedHarness, err := harness.Resolve(name, probeConfig, harness.CLIDeps{Pins: pins})
 		if err == nil {
 			err = resolvedHarness.Detect(context.Background())
 		}

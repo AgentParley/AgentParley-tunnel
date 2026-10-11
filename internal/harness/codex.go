@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -37,15 +35,12 @@ const (
 type codexHarness struct {
 	modelConfigs []config.HarnessModelConfig
 	sessions     *cliround.Manager
+	driver       CLIDriver
 	manifest     func() managedcli.Manifest
 }
 
-func newCodexHarness(harnessConfig config.HarnessConfig, cliSessions *cliround.Manager, pins *managedcli.Refresher) *codexHarness {
-	return &codexHarness{modelConfigs: harnessConfig.Models, sessions: cliSessions, manifest: manifestSource(pins)}
-}
-
-func (h *codexHarness) driver() *codexrpc.Driver {
-	return codexrpc.Shared(h.manifest, log.Default())
+func newCodexHarness(harnessConfig config.HarnessConfig, cli CLIDeps) *codexHarness {
+	return &codexHarness{modelConfigs: harnessConfig.Models, sessions: cli.Sessions, driver: cli.Drivers.For(Codex), manifest: manifestSource(cli.Pins)}
 }
 
 // Detect proves the pinned Codex build is installed, signed in with the daemon's own login, calls an AgentParley tool
@@ -190,9 +185,7 @@ func (h *codexHarness) listAccountModels(ctx context.Context) ([]Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	subprocess := exec.CommandContext(probeCtx, binary, "debug", "models")
-	subprocess.Env = append(os.Environ(), "CODEX_HOME="+cliauth.CodexHome())
-	output, err := subprocess.Output()
+	output, err := cliauth.CodexCommand(probeCtx, binary, "debug", "models").Output()
 	if err != nil {
 		return nil, fmt.Errorf("running codex debug models: %w", err)
 	}
@@ -228,24 +221,5 @@ func (h *codexHarness) Invoke(ctx context.Context, model, payload string) (Invok
 	if model != codexLegacyModelID && !codexModelSlug.MatchString(model) {
 		return InvokeOutcome{}, &cliround.InvalidRequestError{Message: fmt.Sprintf("model %q is not a valid codex model id", model)}
 	}
-	if h.sessions == nil {
-		return InvokeOutcome{}, errors.New("this process has no CLI session manager")
-	}
-
-	driver := h.driver()
-	result, err := h.sessions.Round(ctx, Codex, model, request, driver.Factory, driver.OneShot)
-	if err != nil {
-		return InvokeOutcome{}, err
-	}
-	if result.Calls == nil {
-		result.Calls = []cliround.Call{}
-	}
-	if result.Events == nil {
-		result.Events = []cliround.Event{}
-	}
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		return InvokeOutcome{}, err
-	}
-	return InvokeOutcome{Payload: string(encoded)}, nil
+	return runCLIRound(ctx, h.sessions, h.driver, Codex, model, request)
 }

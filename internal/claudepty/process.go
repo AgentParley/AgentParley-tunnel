@@ -66,24 +66,7 @@ func NewDriver(manifest func() managedcli.Manifest, logger *log.Logger) *Driver 
 	return &Driver{manifest: manifest, logger: logger}
 }
 
-var (
-	sharedOnce   sync.Once
-	sharedDriver *Driver
-)
-
-// Shared is the daemon's one driver; the first caller's manifest source and logger are kept.
-func Shared(manifest func() managedcli.Manifest, logger *log.Logger) *Driver {
-	sharedOnce.Do(func() { sharedDriver = NewDriver(manifest, logger) })
-	return sharedDriver
-}
-
-// Shutdown ends the shared driver's one-shot process, if one was started.
-func Shutdown() {
-	if sharedDriver != nil {
-		sharedDriver.Shutdown()
-	}
-}
-
+// Shutdown ends the one-shot process, if one was started.
 func (d *Driver) Shutdown() {
 	d.utilityMutex.Lock()
 	running := d.utility

@@ -2,7 +2,7 @@
 // Platform, answered with either the model's reply or the tool calls it wants run. The package owns the round
 // contract, the rule that decides whether a warm CLI session can take the next round as-is or must be rebuilt, and
 // the manager that keeps one warm session per conversation. It knows nothing about how a particular CLI is driven;
-// codexrpc and claudepty implement Runner for that.
+// each CLI supplies a Runner and a Factory for that.
 package cliround
 
 import (
@@ -75,6 +75,9 @@ type Request struct {
 	System       *string `json:"system"`
 	Tools        []Tool  `json:"tools"`
 	Items        []Item  `json:"items"`
+
+	// ReplyDirectives are the stage-direction names ([name: ...]) Platform strips from a stored final answer.
+	ReplyDirectives []string `json:"replyDirectives"`
 }
 
 type Usage struct {

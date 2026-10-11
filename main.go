@@ -266,7 +266,7 @@ func runRegister(args []string) error {
 		return fmt.Errorf("%s: %s", harnessName, hint)
 	}
 
-	resolvedHarness, err := harness.Resolve(harnessName, tunnelConfig, nil, nil)
+	resolvedHarness, err := harness.Resolve(harnessName, tunnelConfig, harness.CLIDeps{})
 	if err != nil {
 		return err
 	}
@@ -339,7 +339,7 @@ func registerManagedCLI(tunnelConfig *config.Config, credentials *credstore.Cred
 	if !found {
 		return fail("%s", hint)
 	}
-	resolvedHarness, err := harness.Resolve(harnessName, tunnelConfig, nil, nil)
+	resolvedHarness, err := harness.Resolve(harnessName, tunnelConfig, harness.CLIDeps{})
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -397,7 +397,7 @@ func runRegisterScan(tunnelConfig *config.Config, credentials *credstore.Credent
 			continue
 		}
 
-		resolvedHarness, err := harness.Resolve(harnessName, tunnelConfig, nil, nil)
+		resolvedHarness, err := harness.Resolve(harnessName, tunnelConfig, harness.CLIDeps{})
 		if err != nil {
 			failedCount++
 			fmt.Printf("✗ %-24s %v\n", harnessName, err)

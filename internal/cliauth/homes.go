@@ -3,10 +3,13 @@
 package cliauth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -63,8 +66,29 @@ func CodexWorkDir() string {
 	return ensureDir(filepath.Join(sessions.StateRoot(home), "codex"))
 }
 
+// CodexCommand is the one way the daemon launches its private Codex: in the private work folder, with an explicit
+// CODEX_HOME that replaces any the daemon inherited from its own environment.
+func CodexCommand(ctx context.Context, binary string, args ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, binary, args...)
+	command.Dir = CodexWorkDir()
+	command.Env = append(withoutEnv(os.Environ(), "CODEX_HOME"), "CODEX_HOME="+CodexHome())
+	return command
+}
+
+func withoutEnv(environment []string, name string) []string {
+	kept := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, name+"=") {
+			kept = append(kept, entry)
+		}
+	}
+	return kept
+}
+
 func ensureDir(path string) string {
-	_ = os.MkdirAll(path, privateDirMode)
+	if err := os.MkdirAll(path, privateDirMode); err != nil {
+		log.Printf("cliauth: creating %s: %v", path, err)
+	}
 	return path
 }
 

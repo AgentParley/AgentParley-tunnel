@@ -2,7 +2,6 @@ package harness
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -33,15 +32,12 @@ const (
 type claudeHarness struct {
 	modelConfigs []config.HarnessModelConfig
 	sessions     *cliround.Manager
+	driver       CLIDriver
 	manifest     func() managedcli.Manifest
 }
 
-func newClaudeHarness(harnessConfig config.HarnessConfig, cliSessions *cliround.Manager, pins *managedcli.Refresher) *claudeHarness {
-	return &claudeHarness{modelConfigs: harnessConfig.Models, sessions: cliSessions, manifest: manifestSource(pins)}
-}
-
-func (h *claudeHarness) driver() *claudepty.Driver {
-	return claudepty.Shared(h.manifest, log.Default())
+func newClaudeHarness(harnessConfig config.HarnessConfig, cli CLIDeps) *claudeHarness {
+	return &claudeHarness{modelConfigs: harnessConfig.Models, sessions: cli.Sessions, driver: cli.Drivers.For(Claude), manifest: manifestSource(cli.Pins)}
 }
 
 // Detect proves the pinned Claude Code build is installed, signed in with the daemon's own login, shows no startup
@@ -126,24 +122,5 @@ func (h *claudeHarness) Invoke(ctx context.Context, model, payload string) (Invo
 	if !claudeModelID.MatchString(model) {
 		return InvokeOutcome{}, &cliround.InvalidRequestError{Message: fmt.Sprintf("model %q is not a valid claude model id", model)}
 	}
-	if h.sessions == nil {
-		return InvokeOutcome{}, errors.New("this process has no CLI session manager")
-	}
-
-	driver := h.driver()
-	result, err := h.sessions.Round(ctx, Claude, model, request, driver.Factory, driver.OneShot)
-	if err != nil {
-		return InvokeOutcome{}, err
-	}
-	if result.Calls == nil {
-		result.Calls = []cliround.Call{}
-	}
-	if result.Events == nil {
-		result.Events = []cliround.Event{}
-	}
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		return InvokeOutcome{}, err
-	}
-	return InvokeOutcome{Payload: string(encoded)}, nil
+	return runCLIRound(ctx, h.sessions, h.driver, Claude, model, request)
 }

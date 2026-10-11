@@ -14,9 +14,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/agentparley/tunnel/internal/claudepty"
 	"github.com/agentparley/tunnel/internal/cliround"
-	"github.com/agentparley/tunnel/internal/codexrpc"
 	"github.com/agentparley/tunnel/internal/config"
 	"github.com/agentparley/tunnel/internal/credstore"
 	"github.com/agentparley/tunnel/internal/harness"
@@ -60,8 +58,6 @@ const (
 	maxGrpcMessageBytes   = 16 << 20 // SshEgress raises the same limits: a CLI round carries a whole history
 )
 
-var defaultMaxWarmSessions = map[string]int{harness.Claude: 8, harness.Codex: 32}
-
 const defaultWarmIdleMinutes = 30
 
 type Daemon struct {
@@ -78,6 +74,7 @@ type Daemon struct {
 	workspaceSocketPath string
 	workspaceBridge     *workspaceBridge
 	cliSessions         *cliround.Manager
+	cliDrivers          *harness.CLIDrivers
 	pins                *managedcli.Refresher
 }
 
@@ -106,13 +103,14 @@ func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.S
 		workspaceSocketPath: workspaceSocketPath,
 		workspaceBridge:     newWorkspaceBridge(workspaceSocketPath, log.Default()),
 		cliSessions:         cliround.NewManager(cliLimits(tunnelConfig), log.Default()),
+		cliDrivers:          harness.NewCLIDrivers(pins, log.Default()),
 		pins:                pins,
 	}
 }
 
 func cliLimits(tunnelConfig *config.Config) map[string]cliround.Limits {
 	limits := map[string]cliround.Limits{}
-	for harnessName, defaultMax := range defaultMaxWarmSessions {
+	for harnessName, defaultMax := range harness.DefaultMaxWarmSessions() {
 		harnessConfig := tunnelConfig.Harnesses[harnessName]
 		maxWarm := harnessConfig.MaxWarmSessions
 		if maxWarm == 0 {
@@ -143,12 +141,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 
-	defer codexrpc.Shutdown()
-	defer claudepty.Shutdown()
+	defer d.cliDrivers.Close()
 	defer d.cliSessions.Close()
 	managedcli.PruneOldVersions(d.pins.Current())
 	go d.pins.Run(ctx)
-	go d.runCliSweep(ctx)
+	go d.runCLISweep(ctx)
 	go d.runLedgerSweep(ctx)
 	go d.workspaceBridge.serveSocket(ctx)
 
@@ -326,7 +323,8 @@ func (d *Daemon) serve(ctx context.Context, stream tunnelpb.TunnelService_Connec
 // concurrent operations (several turns addressing one host at once) never race on the single writer below.
 // operationSemaphore bounds how many run at once (Step 14: "serve the operation loop with a bounded worker pool"),
 // and every wait/send here selects on done so a stream that ended while this operation was still running can never
-// block this goroutine forever or write to an abandoned queue.
+// block this goroutine forever or write to an abandoned queue. A CLI round never takes a pool slot: the CLI session
+// manager admits it, and is the only place that answers harness_busy.
 func (d *Daemon) handleOperation(ctx context.Context, operation *tunnelpb.Operation, sendQueue chan<- *tunnelpb.AgentMessage, done <-chan struct{}) {
 	timeoutSeconds := operationTimeoutSeconds(operation)
 	// The queue wait counts against the operation's OWN deadline, derived here rather than once dispatch runs: a
@@ -335,35 +333,52 @@ func (d *Daemon) handleOperation(ctx context.Context, operation *tunnelpb.Operat
 	operationCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
-	select {
-	case d.operationSemaphore <- struct{}{}:
-	case <-operationCtx.Done():
-		select {
-		case sendQueue <- errorMessage(operation.GetCorrelationId(), errorCodeTimeout,
-			fmt.Sprintf("the operation waited more than %ds for a free slot on this box", timeoutSeconds)):
-		case <-done:
+	if !isCLIRound(operation) {
+		if !d.acquireOperationSlot(operationCtx, operation, timeoutSeconds, sendQueue, done) {
+			return
 		}
-		return
-	case <-done:
-		return
-	}
-	defer func() { <-d.operationSemaphore }()
-
-	// A slot freeing in the same instant the deadline expires leaves both select cases ready, and Go picks one at
-	// random — so re-check before dispatching, or that coin flip starts the command microseconds before killing it.
-	if operationCtx.Err() != nil {
-		select {
-		case sendQueue <- errorMessage(operation.GetCorrelationId(), errorCodeTimeout,
-			fmt.Sprintf("the operation waited more than %ds for a free slot on this box", timeoutSeconds)):
-		case <-done:
-		}
-		return
+		defer func() { <-d.operationSemaphore }()
 	}
 
 	message := d.dispatch(operationCtx, operation)
 
 	select {
 	case sendQueue <- message:
+	case <-done:
+	}
+}
+
+func isCLIRound(operation *tunnelpb.Operation) bool {
+	call, ok := operation.GetCall().(*tunnelpb.Operation_InvokeHarness)
+	return ok && harness.IsCLI(call.InvokeHarness.GetHarness())
+}
+
+// acquireOperationSlot waits for a pool slot and reports whether the operation may run; when it may not, the caller
+// has already been answered (or its stream is gone).
+func (d *Daemon) acquireOperationSlot(operationCtx context.Context, operation *tunnelpb.Operation, timeoutSeconds int, sendQueue chan<- *tunnelpb.AgentMessage, done <-chan struct{}) bool {
+	select {
+	case d.operationSemaphore <- struct{}{}:
+	case <-operationCtx.Done():
+		d.answerNoSlot(operation, timeoutSeconds, sendQueue, done)
+		return false
+	case <-done:
+		return false
+	}
+
+	// A slot freeing in the same instant the deadline expires leaves both select cases ready, and Go picks one at
+	// random — so re-check before dispatching, or that coin flip starts the command microseconds before killing it.
+	if operationCtx.Err() != nil {
+		<-d.operationSemaphore
+		d.answerNoSlot(operation, timeoutSeconds, sendQueue, done)
+		return false
+	}
+	return true
+}
+
+func (d *Daemon) answerNoSlot(operation *tunnelpb.Operation, timeoutSeconds int, sendQueue chan<- *tunnelpb.AgentMessage, done <-chan struct{}) {
+	select {
+	case sendQueue <- errorMessage(operation.GetCorrelationId(), errorCodeTimeout,
+		fmt.Sprintf("the operation waited more than %ds for a free slot on this box", timeoutSeconds)):
 	case <-done:
 	}
 }
@@ -388,7 +403,7 @@ func (d *Daemon) runWriter(stream tunnelpb.TunnelService_ConnectClient, queue <-
 	}
 }
 
-func (d *Daemon) runCliSweep(ctx context.Context) {
+func (d *Daemon) runCLISweep(ctx context.Context) {
 	ticker := time.NewTicker(cliSweepInterval)
 	defer ticker.Stop()
 	for {

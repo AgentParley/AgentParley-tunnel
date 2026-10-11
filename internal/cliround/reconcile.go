@@ -52,11 +52,13 @@ func canonicalTools(tools []Tool) []byte {
 	for _, tool := range tools {
 		var parameters any
 		if len(tool.Parameters) > 0 {
-			_ = json.Unmarshal(tool.Parameters, &parameters)
+			if err := json.Unmarshal(tool.Parameters, &parameters); err != nil {
+				parameters = string(tool.Parameters)
+			}
 		}
 		canonical = append(canonical, map[string]any{"name": tool.Name, "description": tool.Description, "parameters": parameters})
 	}
-	encoded, _ := json.Marshal(canonical)
+	encoded, _ := json.Marshal(canonical) // cannot fail: only strings and decoded JSON values go in
 	return encoded
 }
 
@@ -66,8 +68,8 @@ func hashOf(data []byte) string {
 }
 
 // Reconcile decides whether the warm session can take items as they are (Reason "none", with the pieces to feed it)
-// or has to be rebuilt, and why.
-func Reconcile(frame Frame, sessionFrame *Frame, consumed *Consumed, items []Item) Plan {
+// or has to be rebuilt, and why. replyDirectives are the stage-direction names Platform strips from a stored reply.
+func Reconcile(frame Frame, sessionFrame *Frame, consumed *Consumed, items []Item, replyDirectives []string) Plan {
 	if sessionFrame == nil || consumed == nil {
 		return Plan{Reason: RebuildNoSession}
 	}
@@ -92,18 +94,18 @@ func Reconcile(frame Frame, sessionFrame *Frame, consumed *Consumed, items []Ite
 	}
 
 	if consumed.Pending.IsAnswer {
-		return reconcileAnswer(consumed.Pending, remaining)
+		return reconcileAnswer(consumed.Pending, remaining, replyNormalizer(replyDirectives))
 	}
 	return reconcileCalls(consumed.Pending, remaining)
 }
 
-func reconcileAnswer(pending *Output, remaining []Item) Plan {
+func reconcileAnswer(pending *Output, remaining []Item, normalize func(string) string) Plan {
 	if len(remaining) == 0 {
 		return Plan{Reason: RebuildReplyChanged}
 	}
 	accepted := remaining[0]
 	if accepted.Role != RoleAssistant || len(accepted.Calls) > 0 ||
-		NormalizeReply(accepted.Text) != NormalizeReply(pending.AnswerText) {
+		normalize(accepted.Text) != normalize(pending.AnswerText) {
 		return Plan{Reason: RebuildReplyChanged}
 	}
 	if accepted.Key == "" || !allUserItems(remaining[1:]) {
@@ -172,22 +174,32 @@ func containsCallID(callIDs []string, callID string) bool {
 	return false
 }
 
-var motionDirective = regexp.MustCompile(`(?i)[ \t]?\[\s*motion\s*:[^\[\]\r\n]{0,60}\]`)
-
-// NormalizeReply applies the same presentation clean-up Platform applies to a final answer before storing it
-// (SpeechCues.StripDirectives, then trim), so a stored reply that differs from the model's only by a stripped
-// [motion:...] tag still counts as the model's own reply.
-func NormalizeReply(text string) string {
-	if strings.Contains(text, "[") {
-		text = replaceUnlessLink(text)
+// replyNormalizer applies the same presentation clean-up Platform applies to a final answer before storing it
+// (the request's reply directives, written [name: ...], stripped, then trim), so a stored reply that differs from the
+// model's only by a stripped directive still counts as the model's own reply.
+func replyNormalizer(directives []string) func(string) string {
+	quoted := make([]string, 0, len(directives))
+	for _, directive := range directives {
+		if name := strings.TrimSpace(directive); name != "" {
+			quoted = append(quoted, regexp.QuoteMeta(name))
+		}
 	}
-	return strings.TrimSpace(text)
+	if len(quoted) == 0 {
+		return strings.TrimSpace
+	}
+	pattern := regexp.MustCompile(`(?i)[ \t]?\[\s*(?:` + strings.Join(quoted, "|") + `)\s*:[^\[\]\r\n]{0,60}\]`)
+	return func(text string) string {
+		if strings.Contains(text, "[") {
+			text = stripUnlessLink(pattern, text)
+		}
+		return strings.TrimSpace(text)
+	}
 }
 
-func replaceUnlessLink(text string) string {
+func stripUnlessLink(pattern *regexp.Regexp, text string) string {
 	var builder strings.Builder
 	cursor := 0
-	for _, match := range motionDirective.FindAllStringIndex(text, -1) {
+	for _, match := range pattern.FindAllStringIndex(text, -1) {
 		builder.WriteString(text[cursor:match[0]])
 		if match[1] < len(text) && text[match[1]] == '(' {
 			builder.WriteString(text[match[0]:match[1]])
