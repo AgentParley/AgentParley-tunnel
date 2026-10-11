@@ -227,7 +227,8 @@ var codexDisabledFeatures = []string{
 // exec is non-interactive, so any approval prompt reads EOF and auto-declines — no --ask-for-approval flag exists
 // in codex 0.150+); --skip-git-repo-check lets exec run outside a git repo (the box's home dir); -m is omitted
 // only for codexLegacyModelID (a ChatGPT account's own default) and passed explicitly for every other model
-// (verified accepted against codex-cli 0.153.4); -c mcp_servers={} is a highest-precedence inline override
+// (verified accepted against codex-cli 0.153.4); --ephemeral keeps the session off the box's disk, --ignore-user-config
+// skips the owner's config.toml and --ignore-rules skips their execpolicy rules; -c mcp_servers={} is a highest-precedence inline override
 // (documented: CLI/-c overrides beat profile, project .codex/config.toml, user config, and system config) that
 // empties the box's locally configured MCP server table regardless of what the box's own config says. Never add
 // --dangerously-bypass-approvals-and-sandbox: it disables the read-only sandbox AND is codex's only documented way
@@ -239,6 +240,7 @@ func codexArgs(model, reasoningEffort string) []string {
 	args := []string{
 		"exec", "--json",
 		"--skip-git-repo-check",
+		"--ephemeral", "--ignore-user-config", "--ignore-rules",
 		"--sandbox", "read-only",
 		"-c", "mcp_servers={}",
 		"-c", "web_search=disabled",
