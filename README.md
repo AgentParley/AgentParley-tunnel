@@ -307,9 +307,14 @@ harness genuinely failed; a box with no local model providers at all exits 0.
   state folder, so there are no shared refresh tokens that sign you out at random, no sessions or memories written
   into your own `~/.codex` or `~/.claude`, and nothing of yours leaks into AgentParley's chats.
 - **Only AgentParley's tools.** Each chat's model sees the tools AgentParley lists for that step as real native
-  tools, and nothing else: Codex runs as `codex app-server` with its own tools switched off, and Claude Code runs
-  with no built-in tool at all. Anything the CLI tries on its own (a shell command, a file edit, a slash command)
-  is refused and shown in the chat's work block. Claude Code replaces any tool result longer than 50,000 characters
+  tools. Codex runs as `codex app-server` with its own tools switched off and a copy of its model catalog without
+  `multi_agent_version` (the gpt-5.6 models otherwise turn on Codex's sub-agents whatever `features.multi_agent`
+  says); what is left of the engine (`exec`, which fails because the managed copy has no code-mode host, `wait`,
+  `update_plan`, `skills__*`) cannot reach the box. Claude Code runs with no built-in tool except `EndConversation`,
+  which a subscription login switches on by server flag and no setting removes; the mod refuses every call to it.
+  Anything the CLI tries on its own (a shell command, a file edit, a slash command) is refused and shown in the
+  chat's work block. A message the user sends while a tool runs reaches Claude Code labelled as a user message on
+  that tool's result, because a mod cannot add a user turn in the middle of one. Claude Code replaces any tool result longer than 50,000 characters
   with a short preview and the path of a file the model cannot read, so the daemon cuts such a result itself (at
   49,000 characters, with a note saying how much was left out) and the model keeps the first part.
 - **Warm sessions.** A chat keeps its CLI session open between steps (one Codex thread, one Claude Code process),

@@ -31,7 +31,13 @@ const (
 
 	missingResultText = "No result was recorded for this call."
 
-	toolNote = "Your tools are named mcp__agentparley__<name>. Where these instructions name a tool, call it by that prefixed name."
+	toolNote = "Your tools are named mcp__agentparley__<name>. Where these instructions name a tool, call it by that prefixed name. " +
+		"A message the user sends while your tools run reaches you as additional context on the last tool result, starting with \"" +
+		userMessageLabel + "\". It really is from the user: read it and act on it like any other user message."
+
+	// userMessageLabel starts user input that rides on a tool result: Claude Code shows it as hook context inside the
+	// tool output, and without the label and the tool note the model ignores it as a prompt injection.
+	userMessageLabel = "Message from the user, sent while your tool was running:"
 )
 
 var (
@@ -283,11 +289,15 @@ func (s *Session) deliverResults(results, newInput []cliround.Item) {
 		answer := toolAnswer{Text: capToolResult(result.Text)}
 		if index == len(results)-1 {
 			for _, item := range newInput {
-				answer.Context = append(answer.Context, capText(item.Text, maxContextUnits))
+				answer.Context = append(answer.Context, userMessageContext(item.Text))
 			}
 		}
 		s.process.bridge.deliver(result.CallID, answer)
 	}
+}
+
+func userMessageContext(text string) string {
+	return userMessageLabel + "\n" + capText(text, maxContextUnits)
 }
 
 func (s *Session) openRound() (*round, error) {

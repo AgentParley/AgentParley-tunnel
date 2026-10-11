@@ -3,13 +3,17 @@ package codexrpc
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/agentparley/tunnel/internal/atomicfile"
 	"github.com/agentparley/tunnel/internal/cliauth"
 	"github.com/agentparley/tunnel/internal/managedcli"
 	"github.com/agentparley/tunnel/internal/version"
@@ -30,9 +34,10 @@ var disabledFeatures = []string{
 	"browser_use", "computer_use", "tool_suggest", "skill_search", "memories",
 }
 
-func appServerArgs() []string {
+func appServerArgs(modelCatalogPath string) []string {
 	args := []string{
 		"app-server", "--listen", "stdio://",
+		"-c", "model_catalog_json=" + strconv.Quote(modelCatalogPath),
 		"-c", "mcp_servers={}",
 		"-c", "web_search=disabled",
 		"-c", "include_apply_patch_tool=false",
@@ -54,8 +59,40 @@ type server struct {
 	exited  chan struct{}
 }
 
+// writeModelCatalog writes the pinned build's own model catalog without multi_agent_version. The gpt-5.6 models carry
+// "multi_agent_version":"v2", which turns Codex's sub-agent tools on whatever features.multi_agent says, and a sub-agent
+// makes model calls of its own that Platform never sees as steps.
+func writeModelCatalog(ctx context.Context, binary string) (string, error) {
+	output, err := cliauth.CodexCommand(ctx, binary, "debug", "models").Output()
+	if err != nil {
+		return "", fmt.Errorf("reading the codex model catalog: %w", err)
+	}
+	var catalog struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(output, &catalog); err != nil || len(catalog.Models) == 0 {
+		return "", fmt.Errorf("reading the codex model catalog: unexpected output")
+	}
+	for _, model := range catalog.Models {
+		delete(model, "multi_agent_version")
+	}
+	data, err := json.Marshal(catalog)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(cliauth.CodexHome(), "agentparley-models-"+filepath.Base(filepath.Dir(binary))+".json")
+	if err := atomicfile.Write(path, data); err != nil {
+		return "", fmt.Errorf("writing the codex model catalog: %w", err)
+	}
+	return path, nil
+}
+
 func startServer(ctx context.Context, binary string, logger *log.Logger) (*server, error) {
-	command := cliauth.CodexCommand(context.Background(), binary, appServerArgs()...)
+	modelCatalogPath, err := writeModelCatalog(ctx, binary)
+	if err != nil {
+		return nil, err
+	}
+	command := cliauth.CodexCommand(context.Background(), binary, appServerArgs(modelCatalogPath)...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 
 	stdin, err := command.StdinPipe()

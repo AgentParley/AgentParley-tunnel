@@ -131,7 +131,7 @@ func (s *Session) armReplay(window []cliround.Item) {
 		case cliround.RoleUser:
 			if lastResult != "" {
 				answer := answers[lastResult]
-				answer.Context = append(answer.Context, capText(item.Text, maxContextUnits))
+				answer.Context = append(answer.Context, userMessageContext(item.Text))
 				answers[lastResult] = answer
 			}
 		}

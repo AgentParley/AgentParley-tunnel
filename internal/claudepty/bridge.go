@@ -28,9 +28,9 @@ const (
 	toolPrefix = "mcp__agentparley__"
 )
 
-// toleratedTools are the engine tools allowed to exist next to AgentParley's. With --tools naming one built-in and a
-// deny rule on it the list is empty in practice; the set is the room left if a later build lists one more.
-var toleratedTools = map[string]bool{"ToolSearch": true}
+// toleratedTools are the engine tools allowed to exist next to AgentParley's; the mod's tool.check denies every call to
+// them. EndConversation is switched on by a server flag for subscription logins and no flag or deny rule removes it.
+var toleratedTools = map[string]bool{"ToolSearch": true, "EndConversation": true}
 
 // command is one instruction the mod picks up from GET /next.
 type command struct {
