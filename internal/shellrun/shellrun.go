@@ -21,6 +21,8 @@ type Result struct {
 	TimedOut   bool
 }
 
+const outputDrainAfterExit = 2 * time.Second
+
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // Run execs the already-wrapped command verbatim through the resolved user's login shell — `shell -c command` is
@@ -56,6 +58,9 @@ func Run(ctx context.Context, user *User, command string, timeoutSeconds, maxOut
 		cmd.Env = append(cmd.Env, fmt.Sprintf("AGENTPARLEY_SESSION_ID=%d", sessionID))
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// `a && nohup job &` leaves a subshell holding our stdout pipe until the job ends; without this the command
+	// would only "finish" when that detached job does.
+	cmd.WaitDelay = outputDrainAfterExit
 
 	stdout := newLimitedWriter(maxOutputBytes)
 	stderr := newLimitedWriter(maxOutputBytes)
@@ -92,7 +97,7 @@ func Run(ctx context.Context, user *User, command string, timeoutSeconds, maxOut
 }
 
 func exitCodeFrom(waitErr error) int {
-	if waitErr == nil {
+	if waitErr == nil || errors.Is(waitErr, exec.ErrWaitDelay) {
 		return 0
 	}
 	var exitError *exec.ExitError
