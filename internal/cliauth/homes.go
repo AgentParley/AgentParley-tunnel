@@ -44,6 +44,16 @@ func ClaudeWorkDir() string {
 	return ensureDir(filepath.Join(sessions.StateRoot(home), "claude", "cwd"))
 }
 
+// CodexWorkDir is the only folder the Codex app-server is started in, on tmpfs so nothing it writes there survives a
+// reboot.
+func CodexWorkDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	return ensureDir(filepath.Join(sessions.StateRoot(home), "codex"))
+}
+
 func ensureDir(path string) string {
 	_ = os.MkdirAll(path, privateDirMode)
 	return path

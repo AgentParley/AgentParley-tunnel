@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/agentparley/tunnel/internal/config"
 	"github.com/agentparley/tunnel/internal/credstore"
 	"github.com/agentparley/tunnel/internal/harness"
+	"github.com/agentparley/tunnel/internal/managedcli"
 	"github.com/agentparley/tunnel/internal/policy"
 	"github.com/agentparley/tunnel/internal/selfupdate"
 	"github.com/agentparley/tunnel/internal/shellrun"
@@ -285,6 +287,7 @@ func doctorProviders(tunnelConfig *config.Config, configErr error, runAsUser *sh
 		return outcomeSkip
 	}
 
+	printPinSummary()
 	fmt.Println("  (checking providers, this sends each CLI a tiny test prompt…)")
 
 	harnessPolicy := policy.New(tunnelConfig)
@@ -341,4 +344,15 @@ func harnessesToCheck(tunnelConfig *config.Config) ([]string, error) {
 
 	sort.Strings(names)
 	return names, nil
+}
+
+// printPinSummary shows which pin list this box is using and the CLI versions it pins.
+func printPinSummary() {
+	current := managedcli.NewRefresher(credstore.StateDir(), log.Default()).Current()
+	versions := make([]string, 0, len(current.Harnesses))
+	for name, pin := range current.Harnesses {
+		versions = append(versions, name+" "+pin.Version)
+	}
+	sort.Strings(versions)
+	fmt.Printf("  pins: serial %d — %s\n", current.Serial, strings.Join(versions, ", "))
 }

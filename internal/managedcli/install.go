@@ -174,3 +174,17 @@ func PruneOldVersions(m Manifest) {
 		}
 	}
 }
+
+// RemoveInstalled deletes every installed version of name — the inverse of Ensure, used by `unregister`.
+func RemoveInstalled(name string) error {
+	matches, err := filepath.Glob(filepath.Join(BinDir(), name+"-*"))
+	if err != nil {
+		return err
+	}
+	for _, match := range matches {
+		if err := os.RemoveAll(match); err != nil {
+			return err
+		}
+	}
+	return nil
+}

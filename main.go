@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -27,14 +28,17 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/agentparley/tunnel/internal/cliauth"
 	"github.com/agentparley/tunnel/internal/client"
 	"github.com/agentparley/tunnel/internal/config"
 	"github.com/agentparley/tunnel/internal/credstore"
 	"github.com/agentparley/tunnel/internal/harness"
 	"github.com/agentparley/tunnel/internal/login"
+	"github.com/agentparley/tunnel/internal/managedcli"
 	"github.com/agentparley/tunnel/internal/policy"
 	"github.com/agentparley/tunnel/internal/selfupdate"
 	"github.com/agentparley/tunnel/internal/shellrun"
@@ -80,9 +84,19 @@ func main() {
 	}
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "agentparley:", err)
+		var reported *reportedError
+		if !errors.As(err, &reported) {
+			fmt.Fprintln(os.Stderr, "agentparley:", err)
+		}
 		os.Exit(1)
 	}
+}
+
+// reportedError is a failure the command has already printed in full; main only sets the exit code.
+type reportedError struct{}
+
+func (*reportedError) Error() string {
+	return "failed"
 }
 
 func usage() {
@@ -237,6 +251,9 @@ func runRegister(args []string) error {
 	if ok, reason := policy.New(tunnelConfig).HarnessDiscoverable(harnessName); !ok {
 		return fmt.Errorf("%s: %s in config.yaml", harnessName, reason)
 	}
+	if isManagedCLI(harnessName) {
+		return registerManagedCLI(tunnelConfig, credentials, runAsUser, harnessName)
+	}
 
 	found, hint, err := harness.Discover(harnessName, tunnelConfig, runAsUser)
 	if err != nil {
@@ -270,6 +287,63 @@ func runRegister(args []string) error {
 	}
 
 	fmt.Printf("Registered %s: %d model(s) now available in the AgentParley console.\n", harnessName, registerHarnessResult.ModelCount)
+	return nil
+}
+
+// isManagedCLI reports whether the daemon runs its own pinned copy of this CLI with its own login.
+func isManagedCLI(harnessName string) bool {
+	return harnessName == harness.Codex
+}
+
+// registerManagedCLI is `register codex`: install the pinned build, sign the daemon's own login in when there is none,
+// prove the CLI works through the real probe, and tell the console about the models.
+func registerManagedCLI(tunnelConfig *config.Config, credentials *credstore.Credentials, runAsUser *shellrun.User, harnessName string) error {
+	ctx := context.Background()
+	fail := func(format string, args ...any) error {
+		fmt.Printf("✗ %-8s %s\n", harnessName, fmt.Sprintf(format, args...))
+		return &reportedError{}
+	}
+
+	pins := managedcli.NewRefresher(credstore.StateDir(), log.Default())
+	binary, _, err := managedcli.Ensure(ctx, pins.Current(), harnessName)
+	if err != nil {
+		return fail("could not install the pinned build: %v", err)
+	}
+
+	if !cliauth.HasCodexLogin() {
+		fmt.Printf("Signing %s in for AgentParley (a separate login from your own %s)…\n", harnessName, harnessName)
+		if err := cliauth.LoginCodex(ctx, binary, os.Stdin); err != nil {
+			return fail("sign-in did not finish: %v", err)
+		}
+	}
+
+	found, hint, err := harness.Discover(harnessName, tunnelConfig, runAsUser)
+	if err != nil {
+		return fail("%v", err)
+	}
+	if !found {
+		return fail("%s", hint)
+	}
+	resolvedHarness, err := harness.Resolve(harnessName, tunnelConfig, nil, nil)
+	if err != nil {
+		return fail("%v", err)
+	}
+	if err := resolvedHarness.Detect(ctx); err != nil {
+		return fail("installed but not ready: %v", err)
+	}
+	models, err := resolvedHarness.ListModels(ctx)
+	if err != nil {
+		return fail("listing models: %v", err)
+	}
+	if _, err := client.RegisterHarness(&http.Client{Timeout: 30 * time.Second}, tunnelConfig.Server.APIBaseURL, credentials, harnessName, models); err != nil {
+		return fail("registering: %v", err)
+	}
+
+	modelIDs := make([]string, 0, len(models))
+	for _, model := range models {
+		modelIDs = append(modelIDs, model.ID)
+	}
+	fmt.Printf("✓ %-8s %s\n", harnessName, strings.Join(modelIDs, ", "))
 	return nil
 }
 
@@ -381,6 +455,15 @@ func runUnregister(args []string) error {
 
 	if err := client.UnregisterHarness(&http.Client{Timeout: 30 * time.Second}, tunnelConfig.Server.APIBaseURL, credentials, harnessName); err != nil {
 		return err
+	}
+
+	if isManagedCLI(harnessName) {
+		if err := cliauth.Logout(harnessName); err != nil {
+			return fmt.Errorf("removing the %s login: %w", harnessName, err)
+		}
+		if err := managedcli.RemoveInstalled(harnessName); err != nil {
+			return fmt.Errorf("removing the installed %s: %w", harnessName, err)
+		}
 	}
 
 	fmt.Printf("Unregistered %s.\n", harnessName)

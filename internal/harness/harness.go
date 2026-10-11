@@ -69,7 +69,8 @@ type Harness interface {
 // already says (config always wins; see withDiscoveredURL and the CLI constructors).
 //
 // cliSessions and pins are the daemon's warm CLI sessions and managed CLI builds. A caller outside the running
-// daemon (register, doctor) passes nil for both; the CLI harnesses do not use them yet.
+// daemon (register, doctor) passes nil for both: the harness then reads the persisted or embedded pin list and can
+// run its Detect probe, but not a conversation round.
 func Resolve(harnessName string, tunnelConfig *config.Config, cliSessions *cliround.Manager, pins *managedcli.Refresher) (Harness, error) {
 	harnessConfig := tunnelConfig.Harnesses[harnessName]
 	discoveries, err := loadDiscoveries()
@@ -80,7 +81,7 @@ func Resolve(harnessName string, tunnelConfig *config.Config, cliSessions *cliro
 
 	switch harnessName {
 	case Codex:
-		return newCodexHarness(harnessConfig, discovered), nil
+		return newCodexHarness(harnessConfig, cliSessions, pins), nil
 	case Claude:
 		return newClaudeHarness(harnessConfig, discovered), nil
 	case Ollama:

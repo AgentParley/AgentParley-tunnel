@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentparley/tunnel/internal/cliauth"
 	"github.com/agentparley/tunnel/internal/config"
 	"github.com/agentparley/tunnel/internal/credstore"
 	"github.com/agentparley/tunnel/internal/shellrun"
@@ -116,7 +117,7 @@ func saveDiscovery(harnessName string, discovered discoveredHarness) error {
 func Discover(harnessName string, tunnelConfig *config.Config, runAsUser *shellrun.User) (found bool, hint string, err error) {
 	switch harnessName {
 	case Codex:
-		return discoverCLI(Codex, "codex", tunnelConfig, runAsUser)
+		return discoverManagedCLI(Codex, cliauth.HasCodexLogin())
 	case Claude:
 		return discoverCLI(Claude, "claude", tunnelConfig, runAsUser)
 	case Ollama:
@@ -126,6 +127,16 @@ func Discover(harnessName string, tunnelConfig *config.Config, runAsUser *shellr
 	default:
 		return false, "", fmt.Errorf("unknown harness %q", harnessName)
 	}
+}
+
+// discoverManagedCLI reports a daemon-managed CLI as found once the daemon has its own login for it. Nothing about
+// where the CLI lives is recorded: the daemon runs its own pinned copy. The empty entry only tells `doctor` that
+// `register` has run for this harness.
+func discoverManagedCLI(harnessName string, hasLogin bool) (found bool, hint string, err error) {
+	if !hasLogin {
+		return false, fmt.Sprintf("not signed in for AgentParley — run: agentparley register %s", harnessName), nil
+	}
+	return true, "", saveDiscovery(harnessName, discoveredHarness{})
 }
 
 // discoverCLI resolves an absolute command and the PATH it needs at invoke time for one CLI-family harness, and

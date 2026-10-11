@@ -3,118 +3,167 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/agentparley/tunnel/internal/cliauth"
+	"github.com/agentparley/tunnel/internal/cliround"
+	"github.com/agentparley/tunnel/internal/codexrpc"
 	"github.com/agentparley/tunnel/internal/config"
+	"github.com/agentparley/tunnel/internal/managedcli"
 )
 
-// codexMinMajor/Minor/Patch is a fast pre-check, not the real gate — the empirical probe in Detect (which runs the
-// exact pinned argv) is what actually proves this install accepts every pinned flag and is signed in, so anything
-// where the pin doesn't work is refused regardless of version. Floor kept at 0.146.1 as a conservative floor; the
-// pinned flag contract below was verified EMPIRICALLY against codex-cli 0.150.1 (a completion ran, and a prompted
-// write was refused with "this session has read-only filesystem access" — no file created). The flags changed from
-// earlier codex: `--ask-for-approval` was removed (exec is non-interactive, so approvals auto-decline on EOF stdin),
-// and `--skip-git-repo-check` is now required to run outside a git repo. `-c key=value` still overrides at highest
-// precedence, which is what lets `-c mcp_servers={}` empty the box's MCP table. An earlier version of this comment
-// claimed a ChatGPT-account codex rejects an explicit `-m` — re-verified against codex-cli 0.153.4 with a ChatGPT
-// login: `-m gpt-5.6-sol` (a real account model slug) is accepted and runs fine, so that limitation no longer
-// holds; Invoke now passes -m for every model except the legacy default id (codexLegacyModelID). Re-verify the
-// flag contract against a real codex before bumping the floor.
-const (
-	codexMinMajor = 0
-	codexMinMinor = 146
-	codexMinPatch = 1
-)
+// codexLegacyModelID is the id that names no model: Codex uses whatever its account defaults to. Registrations made
+// before `codex debug models` existed, and the fallback list below, use it.
+const codexLegacyModelID = codexrpc.LegacyModelID
 
-// codexProbePrompt is the trivial throwaway prompt Detect sends through the real pinned argv to empirically prove
-// the installed codex CLI accepts every pinned flag AND is signed in — the version floor above proves the flags
-// exist in this release (verified against OpenAI's docs), but not that this particular install is actually logged
-// in, which registration should confirm before advertising its models to the console.
-const codexProbePrompt = "reply with: ok"
-
-// codexLegacyModelID is Invoke's no-flag special case: this id passes NO -m, so codex uses whatever model its
-// account is entitled to. Kept for boxes registered before `codex debug models` existed (or a codex CLI too old to
-// have it) — codexDefaultModels below is exactly this one entry, and listAccountModels falling back to it means an
-// existing registration keeps invoking exactly the way it always has.
-const codexLegacyModelID = "codex"
-
-// codexDefaultModels is the fallback used only when `codex debug models` isn't available (a codex CLI too old to
-// have it, verified present in 0.153.4) or reports nothing usable. Context window is held conservative —
-// overstating is the failure that bricks a session (see HarnessModelConfig.ContextWindowTokens); a box that needs
-// the true window sets it in config.
+// codexDefaultModels is the fallback used only when `codex debug models` reports nothing usable. The context window
+// is held conservative: overstating it is the failure that bricks a session (see HarnessModelConfig.ContextWindowTokens).
 var codexDefaultModels = []Model{
 	{ID: codexLegacyModelID, Label: "Codex (ChatGPT account default)", ContextWindowTokens: 256_000},
 }
 
-// codexDebugModelsTimeout bounds the `codex debug models` probe — a hung account lookup must not block register,
-// or a later invoke's model validation, forever.
-const codexDebugModelsTimeout = 30 * time.Second
+const (
+	codexDebugModelsTimeout = 30 * time.Second
+	codexProbeBudget        = 90 * time.Second
+)
 
 type codexHarness struct {
-	command      string
-	path         string
 	modelConfigs []config.HarnessModelConfig
+	sessions     *cliround.Manager
+	manifest     func() managedcli.Manifest
 }
 
-func newCodexHarness(harnessConfig config.HarnessConfig, discovered discoveredHarness) *codexHarness {
-	command := harnessConfig.Command
-	if command == "" {
-		command = discovered.Command
-	}
-	if command == "" {
-		command = "codex"
-	}
-	return &codexHarness{command: command, path: discovered.Path, modelConfigs: harnessConfig.Models}
+func newCodexHarness(harnessConfig config.HarnessConfig, cliSessions *cliround.Manager, pins *managedcli.Refresher) *codexHarness {
+	return &codexHarness{modelConfigs: harnessConfig.Models, sessions: cliSessions, manifest: manifestSource(pins)}
 }
 
-// Detect runs the exact pinned Invoke argv (see codexArgs) against codexProbePrompt and requires it to succeed:
-// the process must run, every flag must be accepted (an unknown-flag/parse error is a refusal), it must exit 0,
-// and the `--json` output must parse as the JSON-lines event stream codex documents. Anything else refuses
-// registration — fail closed, same as claude's floor, but proven empirically rather than by version number.
+func (h *codexHarness) driver() *codexrpc.Driver {
+	return codexrpc.Shared(h.manifest, log.Default())
+}
+
+// Detect proves the pinned Codex build is installed, signed in with the daemon's own login, calls an AgentParley tool
+// directly (never through a code-mode cell), and continues a thread rebuilt from injected history.
 func (h *codexHarness) Detect(ctx context.Context) error {
-	resolvedPath, err := exec.LookPath(h.command)
+	if !cliauth.HasCodexLogin() {
+		return errors.New("Codex is not signed in for AgentParley — run `agentparley register codex`")
+	}
+	if _, _, err := managedcli.Ensure(ctx, h.manifest(), "codex"); err != nil {
+		return err
+	}
+	models, err := h.ListModels(ctx)
 	if err != nil {
-		if filepath.IsAbs(h.command) {
-			return fmt.Errorf("%q no longer exists — it may have been moved or uninstalled; re-run 'agentparley register' to rediscover codex: %w", h.command, err)
-		}
-		return fmt.Errorf("codex CLI (%q) not found on PATH: %w", h.command, err)
+		return err
 	}
 
-	versionCtx, cancel := context.WithTimeout(ctx, capabilityProbeTimeout)
+	probeCtx, cancel := context.WithTimeout(ctx, codexProbeBudget)
 	defer cancel()
-	versionCmd := exec.CommandContext(versionCtx, resolvedPath, "--version")
-	versionCmd.Env = envWithPath(h.path)
-	versionOutput, err := versionCmd.Output()
-	if err != nil {
-		return fmt.Errorf("running %q --version: %w", h.command, err)
+	driver := codexrpc.NewDriver(h.manifest, log.Default())
+	defer driver.Shutdown()
+	if err := probeDirectToolCall(probeCtx, driver, models[0].ID); err != nil {
+		return fmt.Errorf("the direct tool-call probe failed: %w", err)
 	}
-
-	isVersionSupported, err := meetsFloor(string(versionOutput), codexMinMajor, codexMinMinor, codexMinPatch)
-	if err != nil {
-		return fmt.Errorf("could not parse codex CLI version from %q: %w", strings.TrimSpace(string(versionOutput)), err)
+	if err := probeRebuild(probeCtx, driver, models[0].ID); err != nil {
+		return fmt.Errorf("the rebuild probe failed: %w", err)
 	}
-	if !isVersionSupported {
-		return fmt.Errorf("codex CLI version %q is older than the minimum %d.%d.%d required to prove the non-agentic pin (--sandbox read-only --skip-git-repo-check -c mcp_servers={} plus the disabled native-tool features) — upgrade the CLI before registering this harness",
-			strings.TrimSpace(string(versionOutput)), codexMinMajor, codexMinMinor, codexMinPatch)
-	}
-
-	return runCapabilityProbe(ctx, resolvedPath, codexArgs(codexLegacyModelID, ""), codexProbePrompt, h.path, parseCodexJSONLines)
+	return nil
 }
 
-// ListModels returns the config override wholesale when one is set (unchanged behavior). Otherwise it asks the
-// signed-in account for its real catalog via `codex debug models` and falls back to the single legacy entry only
-// when that command isn't available or reports nothing — see listAccountModels.
+var probeEchoTool = cliround.Tool{
+	Name:        "probe_echo",
+	Description: "Echo a number back.",
+	Parameters:  json.RawMessage(`{"type":"object","properties":{"x":{"type":"number"}},"required":["x"],"additionalProperties":false}`),
+}
+
+func probeBudgets(ctx context.Context) cliround.Budgets {
+	remaining := codexProbeBudget
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining = time.Until(deadline)
+	}
+	return cliround.Budgets{Rebuild: remaining, Step: remaining}
+}
+
+func probeDirectToolCall(ctx context.Context, driver *codexrpc.Driver, model string) error {
+	request := &cliround.Request{
+		Effort: "low",
+		Tools:  []cliround.Tool{probeEchoTool},
+		Items:  []cliround.Item{{Key: "p1", Role: cliround.RoleUser, Text: "Call probe_echo with x=1, then reply ok."}},
+	}
+	runner, first, err := driver.Factory(ctx, model, request, probeBudgets(ctx))
+	if err != nil {
+		return err
+	}
+	defer runner.Close()
+	if err := requireCleanRound(first); err != nil {
+		return err
+	}
+	if first.Outcome != cliround.OutcomeToolCalls || len(first.Calls) != 1 || first.Calls[0].Name != "probe_echo" {
+		return fmt.Errorf("expected one probe_echo call, got outcome %q with %d call(s)", first.Outcome, len(first.Calls))
+	}
+	if strings.HasPrefix(first.Calls[0].ID, "exec-") {
+		return errors.New("the tool was called from a code-mode cell instead of directly")
+	}
+
+	plan := cliround.Plan{Results: []cliround.Item{{Role: cliround.RoleTool, CallID: first.Calls[0].ID, Text: `{"echo":1}`}}}
+	second, err := runner.Extend(ctx, plan, request)
+	if err != nil {
+		return err
+	}
+	if err := requireCleanRound(second); err != nil {
+		return err
+	}
+	if second.Outcome != cliround.OutcomeAnswer || strings.TrimSpace(second.Text) == "" {
+		return fmt.Errorf("expected a final answer after the tool result, got outcome %q", second.Outcome)
+	}
+	return nil
+}
+
+func probeRebuild(ctx context.Context, driver *codexrpc.Driver, model string) error {
+	request := &cliround.Request{
+		Effort: "low",
+		Tools:  []cliround.Tool{probeEchoTool},
+		Items: []cliround.Item{
+			{Key: "p1", Role: cliround.RoleUser, Text: "Call probe_echo with x=7, then reply with the echoed number only."},
+			{Key: "p2", Role: cliround.RoleAssistant, Calls: []cliround.Call{{ID: "history-1", Name: "probe_echo", Arguments: json.RawMessage(`{"x":7}`)}}},
+			{Key: "p3", Role: cliround.RoleTool, CallID: "history-1", Text: `{"echo":7}`},
+		},
+	}
+	runner, result, err := driver.Factory(ctx, model, request, probeBudgets(ctx))
+	if err != nil {
+		return err
+	}
+	defer runner.Close()
+	if err := requireCleanRound(result); err != nil {
+		return err
+	}
+	if result.Outcome != cliround.OutcomeAnswer || strings.TrimSpace(result.Text) == "" {
+		return fmt.Errorf("expected a final answer from the rebuilt thread, got outcome %q", result.Outcome)
+	}
+	return nil
+}
+
+// requireCleanRound fails a probe round in which Codex reached for anything that is not an AgentParley tool.
+func requireCleanRound(result *cliround.Result) error {
+	for _, event := range result.Events {
+		if event.Kind == cliround.EventBlockedTool || event.Kind == cliround.EventInternalStep {
+			return fmt.Errorf("Codex used a native tool: %s (%s)", event.Tool, event.Detail)
+		}
+	}
+	return nil
+}
+
+// ListModels returns the config override wholesale when one is set. Otherwise it asks the signed-in account for its
+// real catalog via `codex debug models` and falls back to the single legacy entry when that reports nothing.
 func (h *codexHarness) ListModels(ctx context.Context) ([]Model, error) {
 	if len(h.modelConfigs) > 0 {
 		return resolveCLIModels(codexDefaultModels, h.modelConfigs, Codex)
 	}
-
 	models, err := h.listAccountModels(ctx)
 	if err != nil || len(models) == 0 {
 		return codexDefaultModels, nil
@@ -122,8 +171,8 @@ func (h *codexHarness) ListModels(ctx context.Context) ([]Model, error) {
 	return models, nil
 }
 
-// codexDebugModelsResponse is `codex debug models`' JSON shape (verified against codex-cli 0.153.4). A "hide"
-// visibility model is internal/unlisted and never offered — only "list" models are real, selectable account models.
+// codexDebugModelsResponse is `codex debug models`' JSON shape. A "hide" visibility model is internal and never
+// offered.
 type codexDebugModelsResponse struct {
 	Models []struct {
 		Slug          string `json:"slug"`
@@ -133,24 +182,24 @@ type codexDebugModelsResponse struct {
 	} `json:"models"`
 }
 
-// listAccountModels runs `codex debug models` against this box's signed-in ChatGPT account. A model with no
-// reported (or zero) context window is skipped, never emitted with a guessed value — this package never emits an
-// unknown window (see harness.go's Model doc); a codex CLI too old to have `debug models` (or one that errors for
-// any other reason) is reported as an error, which ListModels turns into the legacy single-entry fallback.
 func (h *codexHarness) listAccountModels(ctx context.Context) ([]Model, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, codexDebugModelsTimeout)
 	defer cancel()
 
-	subprocess := exec.CommandContext(probeCtx, h.command, "debug", "models")
-	subprocess.Env = envWithPath(h.path)
+	binary, _, err := managedcli.Ensure(probeCtx, h.manifest(), "codex")
+	if err != nil {
+		return nil, err
+	}
+	subprocess := exec.CommandContext(probeCtx, binary, "debug", "models")
+	subprocess.Env = append(os.Environ(), "CODEX_HOME="+cliauth.CodexHome())
 	output, err := subprocess.Output()
 	if err != nil {
-		return nil, fmt.Errorf("running %q debug models: %w", h.command, err)
+		return nil, fmt.Errorf("running codex debug models: %w", err)
 	}
 
 	var response codexDebugModelsResponse
 	if err := json.Unmarshal(output, &response); err != nil {
-		return nil, fmt.Errorf("parsing %q debug models output: %w", h.command, err)
+		return nil, fmt.Errorf("parsing codex debug models output: %w", err)
 	}
 
 	models := make([]Model, 0, len(response.Models))
@@ -169,91 +218,34 @@ func (h *codexHarness) listAccountModels(ctx context.Context) ([]Model, error) {
 
 var codexModelSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
+// Invoke runs one round: the request's history is reconciled with the conversation's warm thread, which is extended
+// or rebuilt, and the model's next step comes back as the round result.
 func (h *codexHarness) Invoke(ctx context.Context, model, payload string) (InvokeOutcome, error) {
-	decoded, err := parseClaudeCodexPayload(payload)
+	request, err := cliround.ParseRequest(payload)
 	if err != nil {
 		return InvokeOutcome{}, err
 	}
-
-	// model is wire-supplied and becomes -m's value: a plain model slug is the only shape allowed through
-	// (harness.go's package doc — never a path/URL/flag from the wire); an unknown-but-well-formed slug is codex's
-	// own error to report.
 	if model != codexLegacyModelID && !codexModelSlug.MatchString(model) {
-		return InvokeOutcome{}, fmt.Errorf("model %q is not a valid codex model id", model)
+		return InvokeOutcome{}, &cliround.InvalidRequestError{Message: fmt.Sprintf("model %q is not a valid codex model id", model)}
+	}
+	if h.sessions == nil {
+		return InvokeOutcome{}, errors.New("this process has no CLI session manager")
 	}
 
-	args := codexArgs(model, decoded.ReasoningEffort)
-	// output_schema forces codex's reply into the platform's tool-call envelope via OpenAI structured output — the
-	// reliable replacement for the fenced-JSON-in-prose convention, which a frontier model still fought under the
-	// non-agentic pin. The schema lives on the C# side (single source of truth); the daemon only materializes it to
-	// a file because --output-schema takes a path.
-	if decoded.OutputSchema != "" {
-		schemaPath, cleanup, err := writeOutputSchemaFile(decoded.OutputSchema)
-		if err != nil {
-			return InvokeOutcome{}, err
-		}
-		defer cleanup()
-		args = append(args, "--output-schema", schemaPath)
-	}
-
-	return runCLI(ctx, h.command, args, decoded.Prompt, h.path)
-}
-
-func writeOutputSchemaFile(schema string) (path string, cleanup func(), err error) {
-	file, err := os.CreateTemp("", "codex-output-schema-*.json")
+	driver := h.driver()
+	result, err := h.sessions.Round(ctx, Codex, model, request, driver.Factory, driver.OneShot)
 	if err != nil {
-		return "", nil, fmt.Errorf("creating codex output-schema temp file: %w", err)
+		return InvokeOutcome{}, err
 	}
-	if _, err := file.WriteString(schema); err != nil {
-		file.Close()
-		os.Remove(file.Name())
-		return "", nil, fmt.Errorf("writing codex output-schema: %w", err)
+	if result.Calls == nil {
+		result.Calls = []cliround.Call{}
 	}
-	file.Close()
-	return file.Name(), func() { os.Remove(file.Name()) }, nil
-}
-
-// codexDisabledFeatures switches off every native codex tool. --sandbox read-only alone left the model a working
-// read-only shell (and code-mode exec) on the box, so it ran hidden commands the platform never saw and confused
-// them with its real tools. Verified on codex-cli 0.150.1: with these off, a native exec attempt fails closed
-// ("code-mode host is disabled") and no command_execution item is emitted.
-var codexDisabledFeatures = []string{
-	"shell_tool", "unified_exec", "code_mode_host", "multi_agent", "goals", "view_image", "image_generation",
-	"apps", "plugins", "browser_use", "computer_use", "tool_suggest", "skill_search",
-}
-
-// codexArgs is the FIXED, daemon-owned argv for every codex invocation (Detect's probe and Invoke alike) — never
-// built from wire input beyond model, which Invoke has already checked is a plain model slug. --sandbox read-only blocks writes (codex
-// exec is non-interactive, so any approval prompt reads EOF and auto-declines — no --ask-for-approval flag exists
-// in codex 0.150+); --skip-git-repo-check lets exec run outside a git repo (the box's home dir); -m is omitted
-// only for codexLegacyModelID (a ChatGPT account's own default) and passed explicitly for every other model
-// (verified accepted against codex-cli 0.153.4); --ephemeral keeps the session off the box's disk, --ignore-user-config
-// skips the owner's config.toml and --ignore-rules skips their execpolicy rules; -c mcp_servers={} is a highest-precedence inline override
-// (documented: CLI/-c overrides beat profile, project .codex/config.toml, user config, and system config) that
-// empties the box's locally configured MCP server table regardless of what the box's own config says. Never add
-// --dangerously-bypass-approvals-and-sandbox: it disables the read-only sandbox AND is codex's only documented way
-// to auto-approve MCP tool calls non-interactively (`codex exec` closes stdin, so the approval prompt reads EOF
-// and auto-declines otherwise) — passing it would silently undo this entire pin. reasoningEffort, when non-empty,
-// sets both the effort and "detailed" summaries (verified on codex-cli 0.153.4) — the summaries are what let
-// item.completed "reasoning" events carry readable text back to the platform instead of just a signature.
-func codexArgs(model, reasoningEffort string) []string {
-	args := []string{
-		"exec", "--json",
-		"--skip-git-repo-check",
-		"--ephemeral", "--ignore-user-config", "--ignore-rules",
-		"--sandbox", "read-only",
-		"-c", "mcp_servers={}",
-		"-c", "web_search=disabled",
-		"-c", "include_apply_patch_tool=false",
+	if result.Events == nil {
+		result.Events = []cliround.Event{}
 	}
-	for _, feature := range codexDisabledFeatures {
-		args = append(args, "-c", "features."+feature+"=false")
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return InvokeOutcome{}, err
 	}
-	if model != codexLegacyModelID {
-		args = append(args, "-m", model)
-	}
-	if reasoningEffort != "" {
-		args = append(args, "-c", "model_reasoning_effort="+reasoningEffort, "-c", "model_reasoning_summary=detailed")
-	}
-	return args
+	return InvokeOutcome{Payload: string(encoded)}, nil
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/agentparley/tunnel/internal/cliround"
+	"github.com/agentparley/tunnel/internal/codexrpc"
 	"github.com/agentparley/tunnel/internal/config"
 	"github.com/agentparley/tunnel/internal/credstore"
 	"github.com/agentparley/tunnel/internal/harness"
@@ -141,6 +142,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 
+	defer codexrpc.Shutdown()
 	defer d.cliSessions.Close()
 	managedcli.PruneOldVersions(d.pins.Current())
 	go d.pins.Run(ctx)
