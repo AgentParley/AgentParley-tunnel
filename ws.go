@@ -134,34 +134,44 @@ func wsWrite(socketPath string, sessionID int64, selector, path string) error {
 }
 
 // uploadToStaging POSTs the spooled file to the presigned S3 staging URL as multipart/form-data — every policy
-// field first, the file part ("file") last, exactly as a browser upload does. The body is ≤ the workspace write
-// cap (10 MB), so buffering it is fine.
+// field first, the file part ("file") last, exactly as a browser upload does. The file is streamed so a large package
+// doesn't sit in memory, and S3 refuses a POST with no Content-Length, so the exact size is worked out up front.
 func uploadToStaging(url string, fields map[string]string, filePath string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
 
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
+	head := &bytes.Buffer{}
+	writer := multipart.NewWriter(head)
 	for name, value := range fields {
 		if err := writer.WriteField(name, value); err != nil {
 			return err
 		}
 	}
-	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
-	if err != nil {
+	if _, err := writer.CreateFormFile("file", filepath.Base(filePath)); err != nil {
 		return err
 	}
-	if _, err := io.Copy(part, file); err != nil {
-		return err
-	}
+	headSize := head.Len()
 	if err := writer.Close(); err != nil {
 		return err
 	}
+	tail := bytes.NewReader(append([]byte(nil), head.Bytes()[headSize:]...))
+	head.Truncate(headSize)
 
-	response, err := http.Post(url, writer.FormDataContentType(), body)
+	request, err := http.NewRequest(http.MethodPost, url, io.MultiReader(head, file, tail))
+	if err != nil {
+		return err
+	}
+	request.ContentLength = int64(headSize) + info.Size() + tail.Size()
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return fmt.Errorf("uploading to storage: %w", err)
 	}
