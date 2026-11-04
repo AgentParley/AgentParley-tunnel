@@ -67,9 +67,6 @@ func explainAPIError(err error, active *cliconfig.Active) error {
 			return errors.New("this computer's key was revoked. Run 'agentparley auth login'")
 		}
 	case 402:
-		if apiErr.Code == "api_key_spend_cap_reached" && active.Saved != nil && active.Saved.ManageURL != "" {
-			return fmt.Errorf("%s Raise the limit at %s", apiErr.Message, active.Saved.ManageURL)
-		}
 		return errors.New(apiErr.Message)
 	case 403:
 		if apiErr.Code == "api_scope_missing" {

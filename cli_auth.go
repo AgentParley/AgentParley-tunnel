@@ -36,14 +36,13 @@ func runAuth(args []string) error {
 
 type authTokenResponse struct {
 	APIKey *struct {
-		Secret             string    `json:"secret"`
-		ID                 string    `json:"id"`
-		Name               string    `json:"name"`
-		Prefix             string    `json:"prefix"`
-		Scopes             []string  `json:"scopes"`
-		MonthlySpendCapUsd float64   `json:"monthlySpendCapUsd"`
-		ExpiresAt          time.Time `json:"expiresAt"`
-		ManageURL          string    `json:"manageUrl"`
+		Secret    string    `json:"secret"`
+		ID        string    `json:"id"`
+		Name      string    `json:"name"`
+		Prefix    string    `json:"prefix"`
+		Scopes    []string  `json:"scopes"`
+		ExpiresAt time.Time `json:"expiresAt"`
+		ManageURL string    `json:"manageUrl"`
 	} `json:"apiKey"`
 }
 
@@ -118,8 +117,8 @@ func runAuthLogin(args []string) error {
 		return err
 	}
 
-	fmt.Printf("Signed in. This computer's key is %q (%s…): it may spend up to $%.2f a month and stops working on %s.\n",
-		key.Name, key.Prefix, key.MonthlySpendCapUsd, key.ExpiresAt.Local().Format(dateLayout))
+	fmt.Printf("Signed in. This computer's key is %q (%s…) and stops working on %s.\n",
+		key.Name, key.Prefix, key.ExpiresAt.Local().Format(dateLayout))
 	fmt.Printf("Manage or revoke it at %s\n", key.ManageURL)
 	return nil
 }

@@ -70,8 +70,8 @@ agentparley auth status                     # the saved sign-in, local only
 agentparley auth logout                     # deletes the key on the server, then the saved copy
 ```
 
-- `auth login` creates an API key named "CLI on <host>" that can list agents and read and write chats, may spend
-  up to $25 a month and lasts 90 days. The approval page shows this before you approve. Change or revoke the key in
+- `auth login` creates an API key named "CLI on <host>" that can list agents and read and write chats and lasts
+  90 days. The approval page shows this before you approve. Change or revoke the key in
   Settings > API keys. Signing in again on the same computer makes a second key.
 - The agent's replies go to standard output and status lines to standard error, so
   `agentparley chat jarvis "..." > answer.txt` captures only the answer. Ctrl-C stops waiting; the agent keeps working.
