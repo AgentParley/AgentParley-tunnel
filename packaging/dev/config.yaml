@@ -37,3 +37,13 @@ enabled: true
 #         context_window_tokens: 32768   # required whenever the server doesn't expose max_model_len
 # allow_harnesses: []   # empty = all four harnesses considered (subject to detection succeeding on the box)
 # deny_harnesses: []    # e.g. ["codex"] to keep the codex harness off even if installed
+
+# Relays: what AgentParley may pass a connection on to through this box. Empty = nowhere. Normally edited with
+# `agentparley allow` / `agentparley program add`.
+# relay:
+#   allow: ["192.168.1.20:22", "localhost:3000"]
+#   programs:
+#     notes:
+#       command: [/usr/bin/npx, -y, "@modelcontextprotocol/server-filesystem", /root/notes]
+#       env: {PATH: "/usr/bin:/bin"}
+#   max_concurrent: 128

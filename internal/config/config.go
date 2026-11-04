@@ -6,7 +6,12 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -54,6 +59,99 @@ type Config struct {
 	Harnesses      map[string]HarnessConfig `yaml:"harnesses"`
 	AllowHarnesses []string                 `yaml:"allow_harnesses"`
 	DenyHarnesses  []string                 `yaml:"deny_harnesses"`
+
+	Relay RelayConfig `yaml:"relay"`
+}
+
+// RelayConfig is what this box lets AgentParley pass a connection on to. Both lists are empty on every install until
+// the box owner adds an entry (`sudo agentparley allow` / `program add`); Enabled=false stops relays too.
+type RelayConfig struct {
+	Allow         []string                `yaml:"allow"`
+	Programs      map[string]RelayProgram `yaml:"programs"`
+	MaxConcurrent int                     `yaml:"max_concurrent"` // 0 = 128
+}
+
+// RelayProgram is one named program a relay may start. Command[0] is an absolute path; it is exec'd directly, never
+// through a shell. Env is merged over the base environment and may hold secrets, which is why config.yaml is 0640.
+type RelayProgram struct {
+	Command []string          `yaml:"command"`
+	Env     map[string]string `yaml:"env"`
+}
+
+var (
+	programNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	envKeyPattern      = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+)
+
+// NormaliseAllowEntry validates a "host:port" allow entry and returns it in the canonical form the matcher compares:
+// host lower-cased with IPv6 brackets removed, port without leading zeros.
+func NormaliseAllowEntry(entry string) (host string, port int, err error) {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(entry))
+	if err != nil {
+		return "", 0, fmt.Errorf("relay.allow entry %q must be host:port: %w", entry, err)
+	}
+	if host == "" {
+		return "", 0, fmt.Errorf("relay.allow entry %q has no host", entry)
+	}
+	port, err = strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, fmt.Errorf("relay.allow entry %q has an invalid port (1-65535)", entry)
+	}
+	return strings.ToLower(host), port, nil
+}
+
+// CanonicalAllowEntry is NormaliseAllowEntry rendered back as text, brackets restored for IPv6.
+func CanonicalAllowEntry(entry string) (string, error) {
+	host, port, err := NormaliseAllowEntry(entry)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+// ValidateProgramName enforces the shape of a relay.programs key.
+func ValidateProgramName(name string) error {
+	if !programNamePattern.MatchString(name) {
+		return fmt.Errorf("relay program name %q must match %s", name, programNamePattern)
+	}
+	return nil
+}
+
+// ValidateRelayProgram checks one program's command and env.
+func ValidateRelayProgram(name string, program RelayProgram) error {
+	if err := ValidateProgramName(name); err != nil {
+		return err
+	}
+	if len(program.Command) == 0 || program.Command[0] == "" {
+		return fmt.Errorf("relay.programs.%s.command is empty", name)
+	}
+	if !filepath.IsAbs(program.Command[0]) {
+		return fmt.Errorf("relay.programs.%s.command[0] %q must be an absolute path", name, program.Command[0])
+	}
+	for key := range program.Env {
+		if !envKeyPattern.MatchString(key) {
+			return fmt.Errorf("relay.programs.%s.env key %q is not a valid environment variable name", name, key)
+		}
+	}
+	return nil
+}
+
+// Validate checks the whole relay block; the error names the offending entry.
+func (relay RelayConfig) Validate() error {
+	for _, entry := range relay.Allow {
+		if _, _, err := NormaliseAllowEntry(entry); err != nil {
+			return err
+		}
+	}
+	for name, program := range relay.Programs {
+		if err := ValidateRelayProgram(name, program); err != nil {
+			return err
+		}
+	}
+	if relay.MaxConcurrent < 0 {
+		return fmt.Errorf("relay.max_concurrent cannot be negative")
+	}
+	return nil
 }
 
 // HarnessConfig is one harness's local connection details. URL is used by the server family (ollama defaults to
@@ -128,6 +226,9 @@ func Load(path string) (*Config, error) {
 		if harnessConfig.MaxWarmSessions < 0 || harnessConfig.WarmIdleMinutes < 0 {
 			return nil, fmt.Errorf("parsing config %s: harnesses.%s max_warm_sessions and warm_idle_minutes cannot be negative", path, harnessName)
 		}
+	}
+	if err := tunnelConfig.Relay.Validate(); err != nil {
+		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
 	return &tunnelConfig, nil
 }

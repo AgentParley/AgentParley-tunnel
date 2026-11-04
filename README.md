@@ -244,6 +244,15 @@ max_concurrent_operations: 8   # optional; how many operations this box runs at 
 auto_update: true        # optional; false turns off the automatic update ExecStartPre entirely (default true)
 update_server: https://get.agentparley.ai   # optional; where `agentparley update` checks for new releases
 
+# Relays (see "Reaching other machines and local MCP servers"). Both lists are empty until you add to them.
+relay:
+  allow: []              # exact host:port entries AgentParley may open a pipe to, e.g. "192.168.1.20:22"
+  programs: {}           # named programs AgentParley may start and talk to on stdin/stdout
+  #  notes:
+  #    command: [/home/you/.nvm/versions/node/v22.1.0/bin/npx, -y, "@modelcontextprotocol/server-filesystem", /home/you/notes]
+  #    env: {PATH: "/home/you/.nvm/versions/node/v22.1.0/bin:/usr/bin:/bin"}
+  max_concurrent: 128    # optional; read at daemon start, so changing it needs a restart
+
 # Local model harnesses (see "Registering local model harnesses" below). Every key here is optional — `register`
 # auto-discovers what it can; set these only to override or to supply what discovery can't determine on its own.
 allow_harnesses: []   # empty = all four harnesses considered (subject to detection succeeding on the box)
@@ -271,6 +280,41 @@ invocation the daemon actually executes. Each pattern is matched against the FUL
 any run of characters (including `/` — a command line has no path-segment structure, so `rm -rf /*` matches
 `rm -rf /etc`); everything else in the pattern must match literally. `allow_harnesses`/`deny_harnesses` use the same
 glob matching, against the harness name (`codex`, `claude`, `ollama`, `openai-compatible-local`).
+
+## Reaching other machines and local MCP servers
+
+A **relay** is a pipe that AgentParley opens through this computer to somewhere on its own side: another machine on
+the LAN (so AgentParley can SSH into your NAS through this one tunnel), `localhost:3000` (an MCP server running here),
+or a program this computer starts and talks to over stdin/stdout. The daemon passes the bytes along without reading
+or changing them.
+
+**Default deny.** Nothing is relayable until you say so, and AgentParley can only ask for entries you listed. Run
+these as root; they edit `config.yaml` in place (comments and other keys stay) and take effect on the next
+connection, with no restart:
+
+```bash
+sudo agentparley allow 192.168.1.20:22        # let AgentParley reach this exact address and port
+sudo agentparley disallow 192.168.1.20:22
+sudo agentparley program add notes --env NOTES_DIR=/home/you/notes -- npx -y @modelcontextprotocol/server-filesystem /home/you/notes
+sudo agentparley program remove notes
+```
+
+- An `allow` entry is an exact `host:port`. The host matches case-insensitively (an IP matches in any spelling of the
+  same address); there are no wildcards, ranges or subnets.
+- A program is started by name only. The daemon runs the saved full path directly, with no shell, as the `run_as`
+  user, in its own process group. `program add` looks up a bare command such as `npx` once, when you run it (your
+  `--env PATH`, then the PATH of the user who ran `sudo`, then `~/.local/bin`, `~/.npm-global/bin`, the newest
+  `~/.nvm/versions/node/*/bin` and `/usr/local/bin`) and saves its full path; if no `PATH` is given it saves one
+  that starts with that folder so `#!/usr/bin/env node` scripts find `node`. `env` values are merged over a small base
+  environment (`HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`) and may hold secrets, which is why `config.yaml` is mode
+  0640, owned by root and readable by the `run_as` group.
+- A program never outlives its pipe: it gets SIGTERM, then SIGKILL after 5 seconds. If the daemon itself dies, a
+  parent-death signal stops the program, and the next daemon start kills any left in `relay-programs/`.
+- `read_only` does not affect relays. `enabled: false` stops them. `relay.max_concurrent` (default 128) is read at
+  daemon start.
+- Each relay writes one line to the journal (`journalctl -u agentparley`): the destination, how it ended, the bytes
+  each way and the duration. Data and `env` values are never logged. `agentparley status` lists the allow list and each
+  program's command (env keys only).
 
 ## Registering local model harnesses
 
@@ -360,7 +404,7 @@ model request after the rebuild, whose time depends on the model and on how larg
 
 | Path | Contents | Mode |
 | --- | --- | --- |
-| `/etc/agentparley/config.yaml` | policy config | 0644 |
+| `/etc/agentparley/config.yaml` | policy config (relay `env` values may be secrets) | 0640, root:`run_as` group |
 | `/var/lib/agentparley/credentials.json` | refresh token + Ed25519 key — durable identity, survives a reboot on purpose | 0600, in a 0700 dir |
 | `/var/lib/agentparley/harnesses.json` | what `register` auto-discovered per harness (a local server's URL, or an empty entry for a CLI the daemon runs itself) — merged in under config.yaml, never overriding an explicit value there | 0600, in a 0700 dir |
 | `/var/lib/agentparley/cli/bin/<name>-<version>/` | the daemon's pinned copy of Codex or Claude Code, checksum-verified; old versions are deleted at daemon start | 0700 dir |
@@ -381,3 +425,4 @@ only when neither tmpfs option is available.
 | `claude/` | the Claude Code working folder (`cwd/`) and the private unix sockets the mod talks to (`<pid>-<n>.sock`) | 0700 |
 | `codex/` | the folder the Codex app-server runs in | 0700 |
 | `sessions/{sessionId}-{generation}/` | the actual per-session shell state (working directory, exported environment, command history) — `generation` is `Session.ShellStateGeneration`, currently always 0 | written entirely by the wrapped shell text the platform sends — this daemon never reads or writes these files itself, except to delete the whole directory once its ledger entry ages out |
+| `relay-programs/` | one file per running relay program (its process group and start time), so a restarted daemon can kill leftovers | 0700 |

@@ -16,6 +16,7 @@ import (
 type User struct {
 	Username string
 	UID      int
+	GID      int
 	Home     string
 	Shell    string
 }
@@ -44,7 +45,11 @@ func ResolveUser(username string) (*User, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parsing uid for %s in /etc/passwd: %w", username, err)
 		}
-		return &User{Username: username, UID: uid, Home: fields[5], Shell: fields[6]}, nil
+		gid, err := strconv.Atoi(fields[3])
+		if err != nil {
+			return nil, fmt.Errorf("parsing gid for %s in /etc/passwd: %w", username, err)
+		}
+		return &User{Username: username, UID: uid, GID: gid, Home: fields[5], Shell: fields[6]}, nil
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("reading /etc/passwd: %w", err)

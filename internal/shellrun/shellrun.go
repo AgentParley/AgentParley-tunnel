@@ -23,7 +23,7 @@ type Result struct {
 
 const outputDrainAfterExit = 2 * time.Second
 
-const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+const DefaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // Run execs the already-wrapped command verbatim through the resolved user's login shell — `shell -c command` is
 // exactly what sshd does, and the wrap text (see SshLoginShellWrap) assumes it is being handed to precisely that.
@@ -46,7 +46,7 @@ func Run(ctx context.Context, user *User, command string, timeoutSeconds, maxOut
 		"HOME=" + user.Home,
 		"USER=" + user.Username,
 		"LOGNAME=" + user.Username,
-		"PATH=" + defaultPath,
+		"PATH=" + DefaultPath,
 	}
 	// The `agentparley ws` bridge reads these to reach the local daemon socket and default to this session's agent;
 	// a nohup'd background job inherits them, so ws keeps working after the turn ends. session id 0 = no session

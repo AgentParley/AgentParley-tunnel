@@ -148,8 +148,12 @@ install_binary() {
 
 write_config() {
 	install -d -m 0755 -o root -g root "$CONFIG_DIR"
+	RUN_AS_GROUP="$(id -gn "$RUN_AS_USER")"
 	if [ -f "$CONFIG_FILE" ]; then
-		log "config already exists at $CONFIG_FILE — leaving it as-is"
+		log "config already exists at $CONFIG_FILE — leaving its contents as-is"
+		# relay.programs.*.env may hold secrets: root-owned, readable by the daemon's group only.
+		chown "root:$RUN_AS_GROUP" "$CONFIG_FILE"
+		chmod 0640 "$CONFIG_FILE"
 		return
 	fi
 
@@ -167,7 +171,8 @@ EOF
 	if [ "$UPDATE_SERVER" != "$DEFAULT_UPDATE_SERVER" ]; then
 		echo "update_server: $UPDATE_SERVER" >>"$CONFIG_FILE"
 	fi
-	chmod 0644 "$CONFIG_FILE"
+	chown "root:$RUN_AS_GROUP" "$CONFIG_FILE"
+	chmod 0640 "$CONFIG_FILE"
 }
 
 write_state_dir() {
@@ -200,7 +205,8 @@ TimeoutStopSec=660
 # \`nohup … &\` job the agent launched via RunSshBackgroundCommandUseCase specifically so it would SURVIVE the
 # command that spawned it. \`process\` kills only this unit's own main process, leaving detached children alone.
 # Real sshd sets the same value for the identical reason: reproducing sshd's contract extends to this, not just
-# the environment variables (see internal/shellrun).
+# the environment variables (see internal/shellrun). The daemon stops its own relay programs itself (pid file at
+# start plus a parent-death signal), so this setting does not strand them.
 KillMode=process
 
 NoNewPrivileges=yes

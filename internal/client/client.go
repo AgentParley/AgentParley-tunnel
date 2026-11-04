@@ -21,6 +21,7 @@ import (
 	"github.com/agentparley/tunnel/internal/managedcli"
 	"github.com/agentparley/tunnel/internal/policy"
 	tunnelpb "github.com/agentparley/tunnel/internal/proto"
+	"github.com/agentparley/tunnel/internal/relay"
 	"github.com/agentparley/tunnel/internal/sessions"
 	"github.com/agentparley/tunnel/internal/shellrun"
 	"github.com/agentparley/tunnel/internal/version"
@@ -76,9 +77,12 @@ type Daemon struct {
 	cliSessions         *cliround.Manager
 	cliDrivers          *harness.CLIDrivers
 	pins                *managedcli.Refresher
+	relayPolicy         *relay.Policy
+	relaySlots          chan struct{}
+	relayPrograms       *relay.PidFile
 }
 
-func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.Store, tunnelConfig *config.Config, runAsUser *shellrun.User) *Daemon {
+func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.Store, tunnelConfig *config.Config, configPath string, runAsUser *shellrun.User) *Daemon {
 	maxConcurrentOperations := tunnelConfig.MaxConcurrentOperations
 	if maxConcurrentOperations <= 0 {
 		maxConcurrentOperations = defaultMaxConcurrentOperations
@@ -89,7 +93,12 @@ func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.S
 	pins := managedcli.NewRefresher(credstore.StateDir(), log.Default())
 	pins.SetUpdateServer(tunnelConfig.UpdateServer)
 
+	relayPolicy := relay.NewPolicy(configPath, tunnelConfig)
+
 	return &Daemon{
+		relayPolicy:         relayPolicy,
+		relaySlots:          make(chan struct{}, relayPolicy.MaxConcurrent()),
+		relayPrograms:       relay.NewPidFile(sessions.StateRoot(runAsUser.Home)),
 		apiBaseURL:          apiBaseURL,
 		egressAddress:       egressAddress,
 		allowInsecure:       allowInsecure,
@@ -229,12 +238,12 @@ func (d *Daemon) connectOnce(ctx context.Context, creds *credstore.Credentials, 
 		return fmt.Errorf("opening the connect stream: %w", err)
 	}
 
-	return d.serve(ctx, stream, creds, onConnected)
+	return d.serve(ctx, connection, stream, creds, onConnected)
 }
 
 // serve sends Hello, then relays ServerMessages to dispatch and results back — everything after this point is the
 // operation loop, until the stream ends (network drop, a Shutdown message, or ctx cancellation).
-func (d *Daemon) serve(ctx context.Context, stream tunnelpb.TunnelService_ConnectClient, creds *credstore.Credentials, onConnected func()) error {
+func (d *Daemon) serve(ctx context.Context, connection *grpc.ClientConn, stream tunnelpb.TunnelService_ConnectClient, creds *credstore.Credentials, onConnected func()) error {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
@@ -247,6 +256,7 @@ func (d *Daemon) serve(ctx context.Context, stream tunnelpb.TunnelService_Connec
 		Hostname:        hostname,
 		OperatingSystem: runtime.GOOS,
 		Architecture:    runtime.GOARCH,
+		Capabilities:    []string{"relay"},
 	}}}); err != nil {
 		return fmt.Errorf("sending hello: %w", err)
 	}
@@ -312,6 +322,8 @@ func (d *Daemon) serve(ctx context.Context, stream tunnelpb.TunnelService_Connec
 				go d.handleOperation(streamCtx, kind.Operation, sendQueue, done)
 			case *tunnelpb.ServerMessage_Shutdown:
 				return fmt.Errorf("server closed the connection: %s", kind.Shutdown.GetReason())
+			case *tunnelpb.ServerMessage_OpenRelay:
+				go d.handleOpenRelay(streamCtx, connection, creds.RoutingKey, kind.OpenRelay)
 			case *tunnelpb.ServerMessage_WorkspaceResult:
 				d.workspaceBridge.deliver(kind.WorkspaceResult)
 			}
@@ -429,4 +441,9 @@ func (d *Daemon) runLedgerSweep(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// SweepRelayPrograms kills relay programs a previous run of the daemon left behind.
+func (d *Daemon) SweepRelayPrograms() {
+	d.relayPrograms.SweepAtStart()
 }

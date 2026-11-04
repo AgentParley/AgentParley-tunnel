@@ -75,6 +75,12 @@ func main() {
 		err = runDoctor(os.Args[2:])
 	case "ws":
 		err = runWs(os.Args[2:])
+	case "allow":
+		err = runAllow(os.Args[2:])
+	case "disallow":
+		err = runDisallow(os.Args[2:])
+	case "program":
+		err = runProgram(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -101,6 +107,7 @@ func (*reportedError) Error() string {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: agentparley <login|start|status|logout|register [harness]|unregister <harness>|update|doctor|ws> [flags]")
+	fmt.Fprintln(os.Stderr, "       agentparley allow <host:port> | disallow <host:port> | program add <name> [--env KEY=VALUE]... -- <command> [args...] | program remove <name>   (run with sudo)")
 }
 
 func runLogin(args []string) error {
@@ -153,7 +160,8 @@ func runStart(args []string) error {
 	}
 
 	credentialStore := credstore.New()
-	daemon := client.New(tunnelConfig.Server.APIBaseURL, tunnelConfig.Server.EgressAddress, *insecure, credentialStore, tunnelConfig, runAsUser)
+	daemon := client.New(tunnelConfig.Server.APIBaseURL, tunnelConfig.Server.EgressAddress, *insecure, credentialStore, tunnelConfig, *configPath, runAsUser)
+	daemon.SweepRelayPrograms()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -191,6 +199,7 @@ func runStatus(args []string) error {
 	fmt.Printf("run_as:      %s\n", tunnelConfig.RunAs)
 	fmt.Printf("enabled:     %v\n", tunnelConfig.Enabled)
 	fmt.Printf("read_only:   %v\n", tunnelConfig.ReadOnly)
+	printRelayStatus(tunnelConfig)
 	return nil
 }
 
