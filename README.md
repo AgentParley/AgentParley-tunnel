@@ -309,7 +309,7 @@ sudo agentparley program remove notes
   environment (`HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`) and may hold secrets, which is why `config.yaml` is mode
   0640, owned by root and readable by the `run_as` group.
 - A program never outlives its pipe: it gets SIGTERM, then SIGKILL after 5 seconds. If the daemon itself dies, a
-  parent-death signal stops the program, and the next daemon start kills any left in `relay-programs/`.
+  parent-death signal stops the program, and the next daemon start kills any left in `/var/lib/agentparley/relay-programs/` (one file per program, 0700, owned by `run_as`; a file with other ownership or looser permissions is ignored).
 - `read_only` does not affect relays. `enabled: false` stops them. `relay.max_concurrent` (default 128) is read at
   daemon start.
 - Each relay writes one line to the journal (`journalctl -u agentparley`): the destination, how it ended, the bytes
@@ -417,7 +417,7 @@ Everything below is deliberately **NOT** on persistent disk — a captured sessi
 (an `AWS_SECRET_ACCESS_KEY`, a database password), so both the ledger and the shell state it describes live under a
 tmpfs root that a machine reboot clears (a daemon *process* restart, unlike a reboot, still resumes — tmpfs survives
 that): `/dev/shm/agentparley-$(id -u)`, falling back to `$XDG_RUNTIME_DIR/agentparley` and then `$HOME/.agentparley`
-only when neither tmpfs option is available.
+only when neither tmpfs option is available. The daemon uses a tmpfs folder only if it is a real directory owned by the daemon's user with mode 0700; anything else is skipped.
 
 | Path (relative to the resolved tmpfs root) | Contents | Mode |
 | --- | --- | --- |
@@ -425,4 +425,3 @@ only when neither tmpfs option is available.
 | `claude/` | the Claude Code working folder (`cwd/`) and the private unix sockets the mod talks to (`<pid>-<n>.sock`) | 0700 |
 | `codex/` | the folder the Codex app-server runs in | 0700 |
 | `sessions/{sessionId}-{generation}/` | the actual per-session shell state (working directory, exported environment, command history) — `generation` is `Session.ShellStateGeneration`, currently always 0 | written entirely by the wrapped shell text the platform sends — this daemon never reads or writes these files itself, except to delete the whole directory once its ledger entry ages out |
-| `relay-programs/` | one file per running relay program (its process group and start time), so a restarted daemon can kill leftovers | 0700 |

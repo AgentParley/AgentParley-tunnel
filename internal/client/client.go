@@ -98,7 +98,7 @@ func New(apiBaseURL, egressAddress string, allowInsecure bool, store credstore.S
 	return &Daemon{
 		relayPolicy:         relayPolicy,
 		relaySlots:          make(chan struct{}, relayPolicy.MaxConcurrent()),
-		relayPrograms:       relay.NewPidFile(sessions.StateRoot(runAsUser.Home)),
+		relayPrograms:       relay.NewPidFile(credstore.StateDir()),
 		apiBaseURL:          apiBaseURL,
 		egressAddress:       egressAddress,
 		allowInsecure:       allowInsecure,

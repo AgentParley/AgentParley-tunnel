@@ -13,8 +13,8 @@ import (
 // stop them) kills them when it next starts. The start time guards against a recycled pid.
 type PidFile struct{ dir string }
 
-func NewPidFile(stateRoot string) *PidFile {
-	return &PidFile{dir: filepath.Join(stateRoot, "relay-programs")}
+func NewPidFile(stateDir string) *PidFile {
+	return &PidFile{dir: filepath.Join(stateDir, "relay-programs")}
 }
 
 func (f *PidFile) Add(pgid int) error {
@@ -23,6 +23,9 @@ func (f *PidFile) Add(pgid int) error {
 		return err
 	}
 	if err := os.MkdirAll(f.dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(f.dir, 0o700); err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(f.dir, strconv.Itoa(pgid)), []byte(startTime), 0o600)
@@ -34,6 +37,9 @@ func (f *PidFile) Remove(pgid int) {
 
 // SweepAtStart kills the group of every listed program that is still the same process, then forgets all entries.
 func (f *PidFile) SweepAtStart() {
+	if !ownedPrivate(f.dir, true) {
+		return
+	}
 	entries, err := os.ReadDir(f.dir)
 	if err != nil {
 		return
@@ -42,13 +48,24 @@ func (f *PidFile) SweepAtStart() {
 		path := filepath.Join(f.dir, entry.Name())
 		pgid, err := strconv.Atoi(entry.Name())
 		recorded, readErr := os.ReadFile(path)
-		if err == nil && readErr == nil && pgid > 1 {
+		if err == nil && readErr == nil && pgid > 1 && ownedPrivate(path, false) {
 			if current, startErr := processStartTime(pgid); startErr == nil && current == strings.TrimSpace(string(recorded)) {
 				_ = syscall.Kill(-pgid, syscall.SIGKILL)
 			}
 		}
 		_ = os.Remove(path)
 	}
+}
+
+// ownedPrivate is true for a non-symlink entry of the wanted kind, owned by this process's uid with no group or
+// other access, so a pid file planted by someone else can never make the daemon SIGKILL a process group.
+func ownedPrivate(path string, wantDir bool) bool {
+	info, err := os.Lstat(path)
+	if err != nil || info.IsDir() != wantDir || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) == os.Getuid()
 }
 
 func processStartTime(pid int) (string, error) {

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -196,11 +197,14 @@ func WorkspaceSocketPath(homeDir string) string {
 	return filepath.Join(stateRoot(homeDir), "ws.sock")
 }
 
-// isUsableRoot creates path (0700) if needed and confirms this process can actually write into it — MkdirAll alone
-// reports success for a directory that exists but isn't writable by this uid (e.g. another user's leftover
-// /dev/shm entry), which would otherwise silently strand the ledger and state in different places.
+// isUsableRoot creates path (0700) if needed and accepts it only when it is a real directory (not a symlink) owned
+// by this uid with no group or other access: /dev/shm is world-writable, so another local user could otherwise
+// pre-create agentparley-<uid> (or link it elsewhere) and read or replace the ledger, sockets and pid files.
 func isUsableRoot(path string) bool {
 	if err := os.MkdirAll(path, 0o700); err != nil {
+		return false
+	}
+	if !ownedPrivateDir(path, os.Getuid()) {
 		return false
 	}
 	probe := filepath.Join(path, ".write-probe")
@@ -209,4 +213,13 @@ func isUsableRoot(path string) bool {
 	}
 	_ = os.Remove(probe)
 	return true
+}
+
+func ownedPrivateDir(path string, uid int) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) == uid
 }
