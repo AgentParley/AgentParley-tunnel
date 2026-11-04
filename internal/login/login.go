@@ -5,6 +5,7 @@ package login
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -20,15 +21,9 @@ import (
 	"time"
 
 	"github.com/agentparley/tunnel/internal/credstore"
+	"github.com/agentparley/tunnel/internal/devicegrant"
 	"github.com/agentparley/tunnel/internal/machineid"
 	"github.com/agentparley/tunnel/internal/version"
-)
-
-// ErrExpired and ErrDenied are terminal outcomes — the daemon stops polling and tells the user to run `login`
-// again (expired) or that the request was rejected (denied), rather than retrying forever.
-var (
-	ErrExpired = errors.New("device code expired — run 'agentparley login' again")
-	ErrDenied  = errors.New("device authorization was denied")
 )
 
 // Prompt is what login.Run reports back to the caller so it can show the user code before polling begins.
@@ -72,24 +67,30 @@ type apiClient struct {
 // issued, so the caller can print it before this function blocks on the poll loop.
 func Run(apiBaseURL, runAsUser string, onPrompt func(Prompt)) (*Result, error) {
 	client := &apiClient{baseURL: apiBaseURL, http: &http.Client{Timeout: 15 * time.Second}}
+	ctx := context.Background()
 
-	deviceCodeResponse, err := client.issueDeviceCode()
-	if err != nil {
-		return nil, fmt.Errorf("requesting a device code: %w", err)
-	}
-
-	onPrompt(Prompt{
-		UserCode:        deviceCodeResponse.UserCode,
-		VerificationURI: deviceCodeResponse.VerificationURI,
-		IntervalSeconds: deviceCodeResponse.IntervalSeconds,
-	})
-
-	enrolmentToken, err := client.pollForEnrolmentToken(deviceCodeResponse)
+	code, err := devicegrant.Issue(ctx, client.http, apiBaseURL, devicegrant.LocalRequest(devicegrant.PurposeTunnel, runAsUser))
 	if err != nil {
 		return nil, err
 	}
 
-	return client.enrolWithToken(apiBaseURL, runAsUser, enrolmentToken)
+	onPrompt(Prompt{
+		UserCode:        code.UserCode,
+		VerificationURI: code.VerificationURI,
+		IntervalSeconds: code.IntervalSeconds,
+	})
+
+	var redeemed struct {
+		EnrolmentToken string `json:"enrolmentToken"`
+	}
+	if err := devicegrant.Poll(ctx, client.http, apiBaseURL, code, &redeemed); err != nil {
+		return nil, err
+	}
+	if redeemed.EnrolmentToken == "" {
+		return nil, errors.New("the platform did not return an enrolment token")
+	}
+
+	return client.enrolWithToken(apiBaseURL, runAsUser, redeemed.EnrolmentToken)
 }
 
 // RunWithToken is the non-interactive login: it exchanges an enrolment token that was handed to this box out of band
@@ -140,55 +141,6 @@ func (client *apiClient) enrolWithToken(apiBaseURL, runAsUser, enrolmentToken st
 		SSHHostID:    enrolResponse.SSHHostID,
 		MachineID:    machineID,
 	}}, nil
-}
-
-func (client *apiClient) issueDeviceCode() (*deviceCodeResponse, error) {
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "unknown-host"
-	}
-	machineHint := fmt.Sprintf("%s (%s/%s)", hostname, runtime.GOOS, runtime.GOARCH)
-
-	var response deviceCodeResponse
-	if err := client.postJSON("/tunnel/device/code", deviceCodeRequest{MachineHint: machineHint}, &response); err != nil {
-		return nil, err
-	}
-	return &response, nil
-}
-
-func (client *apiClient) pollForEnrolmentToken(deviceCode *deviceCodeResponse) (string, error) {
-	intervalSeconds := deviceCode.IntervalSeconds
-	deadline := time.Now().Add(time.Until(deviceCode.ExpiresAt))
-
-	for {
-		if time.Now().After(deadline) {
-			return "", ErrExpired
-		}
-		time.Sleep(time.Duration(intervalSeconds) * time.Second)
-
-		var tokenResponse deviceTokenResponse
-		var tokenError deviceTokenError
-		status, err := client.postJSONWithStatus("/tunnel/device/token", deviceTokenRequest{DeviceCode: deviceCode.DeviceCode}, &tokenResponse, &tokenError)
-		if err != nil {
-			return "", err
-		}
-
-		if status == http.StatusOK {
-			return tokenResponse.EnrolmentToken, nil
-		}
-
-		switch tokenError.Error {
-		case "authorization_pending":
-			continue
-		case "slow_down":
-			intervalSeconds += 5
-			continue
-		case "expired_token":
-			return "", ErrExpired
-		default:
-			return "", ErrDenied
-		}
-	}
 }
 
 // enrol classifies its failures so a non-interactive caller can tell "try again later" (*RetryableError) from "this
@@ -252,71 +204,6 @@ func parseRetryAfter(value string) time.Duration {
 		return max(time.Until(retryTime), 0)
 	}
 	return 0
-}
-
-func (client *apiClient) postJSON(path string, requestBody, responseBody any) error {
-	status, err := client.postJSONWithStatus(path, requestBody, responseBody, nil)
-	if err != nil {
-		return err
-	}
-	if status != http.StatusOK {
-		return fmt.Errorf("%s returned unexpected status %d", path, status)
-	}
-	return nil
-}
-
-// postJSONWithStatus decodes into successBody on 2xx, or into errorBody (if non-nil) on any other status —
-// callers that need to distinguish "authorization_pending" from a genuine failure pass both.
-func (client *apiClient) postJSONWithStatus(path string, requestBody, successBody, errorBody any) (int, error) {
-	payload, err := json.Marshal(requestBody)
-	if err != nil {
-		return 0, err
-	}
-
-	httpResponse, err := client.http.Post(client.baseURL+path, "application/json", bytes.NewReader(payload))
-	if err != nil {
-		return 0, err
-	}
-	defer httpResponse.Body.Close()
-
-	if httpResponse.StatusCode >= 200 && httpResponse.StatusCode < 300 {
-		if successBody != nil {
-			if err := json.NewDecoder(httpResponse.Body).Decode(successBody); err != nil {
-				return httpResponse.StatusCode, fmt.Errorf("decoding response from %s: %w", path, err)
-			}
-		}
-		return httpResponse.StatusCode, nil
-	}
-
-	if errorBody != nil {
-		_ = json.NewDecoder(httpResponse.Body).Decode(errorBody)
-		return httpResponse.StatusCode, nil
-	}
-	return httpResponse.StatusCode, fmt.Errorf("%s returned status %d", path, httpResponse.StatusCode)
-}
-
-type deviceCodeRequest struct {
-	MachineHint string `json:"machineHint"`
-}
-
-type deviceCodeResponse struct {
-	UserCode        string    `json:"userCode"`
-	DeviceCode      string    `json:"deviceCode"`
-	VerificationURI string    `json:"verificationUri"`
-	IntervalSeconds int       `json:"intervalSeconds"`
-	ExpiresAt       time.Time `json:"expiresAt"`
-}
-
-type deviceTokenRequest struct {
-	DeviceCode string `json:"deviceCode"`
-}
-
-type deviceTokenResponse struct {
-	EnrolmentToken string `json:"enrolmentToken"`
-}
-
-type deviceTokenError struct {
-	Error string `json:"error"`
 }
 
 type enrolmentTokenRequest struct {

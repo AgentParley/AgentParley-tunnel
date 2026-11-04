@@ -4,7 +4,7 @@ PROTO_DIR   := proto
 PROTO_OUT   := internal/proto
 DIST_DIR    := dist
 
-.PHONY: proto build build-linux-amd64 build-linux-arm64 clean
+.PHONY: proto build build-linux-amd64 build-linux-arm64 build-darwin-arm64 build-darwin-amd64 build-windows-amd64 clean
 
 # Regenerates internal/proto from proto/tunnel.proto — the SAME .proto the SshEgress project's C# server compiles
 # server-side codegen from (AgentParley.Cloud.SshEgress.csproj's <Protobuf> item). Requires protoc,
@@ -16,9 +16,8 @@ proto:
 		--go-grpc_out=$(PROTO_OUT) --go-grpc_opt=paths=source_relative \
 		--proto_path=$(PROTO_DIR) $(PROTO_DIR)/tunnel.proto
 
-# Local-platform build. Only succeeds when GOOS=linux (the host's default on a Linux dev box) — this daemon is
-# Linux-only by design (no *_darwin.go, no Windows; see the plan's guardrails), so building on a non-Linux
-# workstation needs one of the cross-compile targets below instead.
+# Local-platform build. The terminal commands (auth, chat, agents, chats) build on any OS; the daemon commands
+# only on Linux (elsewhere they print a Linux-only message).
 build:
 	go build -o $(DIST_DIR)/$(BINARY) .
 
@@ -27,6 +26,15 @@ build-linux-amd64:
 
 build-linux-arm64:
 	GOOS=linux GOARCH=arm64 go build -o $(DIST_DIR)/$(BINARY)-linux-arm64 .
+
+build-darwin-arm64:
+	GOOS=darwin GOARCH=arm64 go build -o $(DIST_DIR)/$(BINARY)-darwin-arm64 .
+
+build-darwin-amd64:
+	GOOS=darwin GOARCH=amd64 go build -o $(DIST_DIR)/$(BINARY)-darwin-amd64 .
+
+build-windows-amd64:
+	GOOS=windows GOARCH=amd64 go build -o $(DIST_DIR)/$(BINARY)-windows-amd64.exe .
 
 clean:
 	rm -rf $(DIST_DIR)

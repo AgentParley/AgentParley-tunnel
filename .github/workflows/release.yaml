@@ -47,17 +47,20 @@ jobs:
           }
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           # All dependencies (grpc, protobuf, yaml.v3) are pure Go — CGO off is safe and makes the binaries static.
-          for arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+          # macOS and Windows builds carry only the terminal commands (auth, chat, agents, chats).
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            os="${target%/*}"; arch="${target#*/}"; ext=""
+            [ "$os" = windows ] && ext=".exe"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
               -ldflags "-s -w -X github.com/agentparley/tunnel/internal/version.Version=$VERSION" \
-              -o "dist/agentparley-linux-$arch" .
+              -o "dist/agentparley-$os-$arch$ext" .
           done
           # Sidecar checksums install.sh and the daemon's update both verify the download against. Written from
           # inside dist/ so each line carries the bare filename, which is what `sha256sum -c` expects.
-          cd dist && for f in agentparley-linux-amd64 agentparley-linux-arm64; do sha256sum "$f" > "$f.sha256"; done && cd ..
+          cd dist && for f in agentparley-*; do sha256sum "$f" > "$f.sha256"; done && cd ..
           # The daemon's update installs a binary only when its checksum file carries a valid Ed25519 signature by the
           # release key, so a replaced bucket object alone cannot push code to the fleet.
-          for f in agentparley-linux-amd64 agentparley-linux-arm64; do go run ./cmd/clipins sign "dist/$f.sha256"; done
+          for f in dist/agentparley-*.sha256; do go run ./cmd/clipins sign "$f"; done
           echo "$VERSION" > dist/latest-version
 
       - uses: aws-actions/configure-aws-credentials@v4
@@ -74,11 +77,13 @@ jobs:
             echo "s3://$BUCKET/releases/$VERSION/ already exists — versions are write-once, bump the version and re-tag"
             exit 1
           fi
-          aws s3 cp dist/ "s3://$BUCKET/releases/$VERSION/" --recursive --exclude "*" --include "agentparley-linux-*" \
+          aws s3 cp dist/ "s3://$BUCKET/releases/$VERSION/" --recursive --exclude "*" --include "agentparley-*" \
             --cache-control "public, max-age=31536000, immutable"
           for script in install.sh uninstall.sh; do
             aws s3 cp "packaging/linux/$script" "s3://$BUCKET/tunnel/$script" \
               --cache-control "public, max-age=300" --content-type "text/x-shellscript"
           done
+          aws s3 cp packaging/cli/install.sh "s3://$BUCKET/cli/install.sh" \
+            --cache-control "public, max-age=300" --content-type "text/x-shellscript"
           # The pointer, LAST — only once every binary it can point at is fully uploaded.
           aws s3 cp dist/latest-version "s3://$BUCKET/latest-version" --cache-control "public, max-age=300" --content-type "text/plain"

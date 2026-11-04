@@ -36,3 +36,9 @@ jobs:
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -o /dev/null .
           done
+
+      - name: build the command-line tool for macOS and Windows
+        run: |
+          for target in darwin/amd64 darwin/arm64 windows/amd64; do
+            CGO_ENABLED=0 GOOS=${target%/*} GOARCH=${target#*/} go build -trimpath -o /dev/null .
+          done

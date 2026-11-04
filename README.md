@@ -26,7 +26,8 @@ this daemon  --outbound gRPC-->  SSH egress service  <--Runtime posts commands h
 
 - **`login`** — one-time RFC 8628 device grant: prints a short code, waits for approval in the AgentParley portal,
   then generates this box's Ed25519 identity key and exchanges a one-time enrolment token for a durable refresh
-  token. Everything here talks to the PlatformApi only — the egress service is never involved in enrolment.
+  token. The request carries `purpose: "tunnel"` (the same device grant also serves `auth login`, with
+  `purpose: "cli"`). Everything here talks to the PlatformApi only — the egress service is never involved in enrolment.
 - **`start`** — the long-running connect loop (what the systemd unit runs). Refreshes the access token, dials the
   egress service, and answers the commands/file operations AgentParley sends down the stream, reconnecting
   automatically on a dropped connection.
@@ -43,6 +44,46 @@ this daemon  --outbound gRPC-->  SSH egress service  <--Runtime posts commands h
   the systemd unit if it's enabled and was active. See "Updating" below.
 - **`doctor`** — read-only diagnosis: version, config, service status, connectivity, clock skew, and local model
   providers. See "Diagnosing problems" below.
+
+The tunnel commands above (`login`, `start`, `status`, `logout`, `register`, `unregister`, `update`, `doctor`, `ws`)
+run only on Linux. The terminal commands (`auth`, `agents`, `chat`, `chats`, see below) run on Linux, macOS and
+Windows.
+
+## Using AgentParley from a terminal (any computer)
+
+Install the binary (Linux and macOS; no sudo needed, it goes to `/usr/local/bin` if writable, else `~/.local/bin`):
+
+```bash
+curl -fsSL https://get.agentparley.ai/cli/install.sh | sh
+```
+
+On Windows, download `agentparley-windows-amd64.exe` from `https://get.agentparley.ai/releases/<version>/` and put it
+on your PATH.
+
+```bash
+agentparley auth login                      # prints a code and a link; approve it in your browser
+agentparley agents                          # list your agents
+agentparley chat jarvis "is web-1 healthy?" # continues your newest chat with Jarvis from this computer
+agentparley chat --new jarvis "hello"       # a fresh chat; --chat <id> picks a specific one
+agentparley chats                           # the chats this computer's key started (--agent, --limit)
+agentparley auth status                     # the saved sign-in, local only
+agentparley auth logout                     # deletes the key on the server, then the saved copy
+```
+
+- `auth login` creates an API key named "CLI on <host>" that can list agents and read and write chats, may spend
+  up to $25 a month and lasts 90 days. The approval page shows this before you approve. Change or revoke the key in
+  Settings > API keys. Signing in again on the same computer makes a second key.
+- The agent's replies go to standard output and status lines to standard error, so
+  `agentparley chat jarvis "..." > answer.txt` captures only the answer. Ctrl-C stops waiting; the agent keeps working.
+- A key can reach only the chats it started: chats from the console or another computer's key are not listed.
+- `auth logout` calls `DELETE /api/v1/keys/self`, then deletes the saved file. If the call fails, the file is still
+  deleted and the command says the key is still live and where to revoke it.
+- The key is a plain file, mode 0600 in a 0700 folder: `~/.config/agentparley/cli.json` on Linux (or
+  `$XDG_CONFIG_HOME`), `~/Library/Application Support/agentparley/cli.json` on macOS, `%AppData%\agentparley\cli.json`
+  on Windows.
+- `AGENTPARLEY_API_KEY` (a key made in Settings, for CI) wins over the saved sign-in; `AGENTPARLEY_API_SERVER`
+  overrides the server (default `https://services.agentparley.ai/platform`).
+- Listing runs and publishing plugins are not offered: the API has no endpoints for them yet.
 
 ## Install
 
