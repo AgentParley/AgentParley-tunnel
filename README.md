@@ -307,7 +307,12 @@ sudo agentparley program remove notes
   `~/.nvm/versions/node/*/bin` and `/usr/local/bin`) and saves its full path; if no `PATH` is given it saves one
   that starts with that folder so `#!/usr/bin/env node` scripts find `node`. `env` values are merged over a small base
   environment (`HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`) and may hold secrets, which is why `config.yaml` is mode
-  0640, owned by root and readable by the `run_as` group.
+  0640, owned by root and readable by the `run_as` group. Every daemon start puts the file back to that owner and mode
+  (a root-only `ExecStartPre`), and the daemon refuses to start if it holds `env` values and that group is shared with
+  other users (the distro's `users` group, extra members, or another account's primary group). Give `run_as` its own group.
+- **The agent can read program `env` values.** Commands the agent runs execute as the same `run_as` user as the
+  daemon, so anything the daemon can read, the agent can too. Put only scoped, revocable tokens in `env` (a
+  read-only API key for one service), never a password or a key with wider reach than the program needs.
 - A program never outlives its pipe: it gets SIGTERM, then SIGKILL after 5 seconds. If the daemon itself dies, a
   parent-death signal stops the program, and the next daemon start kills any left in `/var/lib/agentparley/relay-programs/` (one file per program, 0700, owned by `run_as`; a file with other ownership or looser permissions is ignored).
 - `read_only` does not affect relays. `enabled: false` stops them. `relay.max_concurrent` (default 128) is read at

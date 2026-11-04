@@ -163,6 +163,9 @@ func runProgramAdd(args []string) error {
 		return err
 	}
 	fmt.Printf("Saved program %s: %s\n%s\n", name, strings.Join(command, " "), relayTakesEffect)
+	if len(env) > 0 {
+		fmt.Println("Note: the agent runs as the same user as this daemon, so it can read these env values. Use scoped, revocable tokens only.")
+	}
 	return nil
 }
 

@@ -219,6 +219,9 @@ TimeoutStartSec=420
 # --from-service both skips the restart (ExecStart below is about to (re)start the daemon anyway) and honors
 # auto_update: false — the ONLY caller that does; \`sudo agentparley update\` typed by a human always updates.
 ExecStartPre=-+/usr/local/bin/agentparley update --from-service
+# Root-only (the + prefix): the daemon runs as the run-as user and cannot chown, so root puts config.yaml back to
+# root:<run-as group> 0640 on every start. A failure here aborts the start rather than leave secrets loose.
+ExecStartPre=+/usr/local/bin/agentparley secure-config
 
 # NO filesystem sandboxing directives here on purpose (no ProtectSystem, PrivateTmp, ProtectHome, ReadOnlyPaths,
 # …). This daemon's entire job is running commands and reading/writing files as an arbitrary path the AGENT

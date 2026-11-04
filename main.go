@@ -81,6 +81,8 @@ func main() {
 		err = runDisallow(os.Args[2:])
 	case "program":
 		err = runProgram(os.Args[2:])
+	case "secure-config":
+		err = runSecureConfig(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -156,6 +158,10 @@ func runStart(args []string) error {
 		return err
 	}
 	if err := shellrun.VerifyMatchesProcess(runAsUser); err != nil {
+		return err
+	}
+
+	if err := requirePrivateConfigGroup(tunnelConfig, runAsUser); err != nil {
 		return err
 	}
 
@@ -598,5 +604,37 @@ func restartServiceIfActive() error {
 		return fmt.Errorf("restarting %s: %w", systemdUnitName, err)
 	}
 	fmt.Printf("restarted %s\n", systemdUnitName)
+	return nil
+}
+
+// runSecureConfig is run by the unit's root-only ExecStartPre: it puts config.yaml at root:<run_as group> 0640
+// before the daemon (which cannot chown) starts.
+func runSecureConfig(args []string) error {
+	flagSet := flag.NewFlagSet("secure-config", flag.ExitOnError)
+	configPath := flagSet.String("config", config.DefaultPath, "path to config.yaml")
+	if err := flagSet.Parse(args); err != nil {
+		return err
+	}
+	tunnelConfig, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	runAsUser, err := shellrun.ResolveUser(tunnelConfig.RunAs)
+	if err != nil {
+		return err
+	}
+	return config.SecureFile(*configPath, runAsUser.GID)
+}
+
+// requirePrivateConfigGroup refuses to start when config.yaml holds program env values and the group that can read
+// the file is shared with other users.
+func requirePrivateConfigGroup(tunnelConfig *config.Config, runAsUser *shellrun.User) error {
+	if !tunnelConfig.Relay.HasProgramEnv() {
+		return nil
+	}
+	if err := config.CheckGroupPrivate(runAsUser.Username, runAsUser.GID); err != nil {
+		return fmt.Errorf("config.yaml holds relay.programs env values but its group is not private to %s (%v): "+
+			"give %s its own group, or remove the env values", runAsUser.Username, err, runAsUser.Username)
+	}
 	return nil
 }
