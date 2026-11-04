@@ -2,8 +2,8 @@ package relay
 
 import (
 	"errors"
-	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"runtime"
@@ -148,7 +148,7 @@ func (p *Program) Close() error {
 	return nil
 }
 
-// ExitMessage describes how the program ended: "exit status N: <stderr tail>".
+// ExitMessage describes how the program ended: "exit status N"; the stderr tail goes to the local log only.
 func (p *Program) ExitMessage() string {
 	select {
 	case <-p.exited:
@@ -163,7 +163,7 @@ func (p *Program) ExitMessage() string {
 		status = p.waitErr.Error()
 	}
 	if tail := p.tail.String(); tail != "" {
-		return fmt.Sprintf("%s: %s", status, tail)
+		log.Printf("relay program %d stderr tail: %s", p.pgid, tail)
 	}
 	return status
 }

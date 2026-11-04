@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -12,7 +13,10 @@ import (
 	"github.com/agentparley/tunnel/internal/config"
 )
 
-const defaultMaxConcurrent = 128
+const (
+	defaultMaxConcurrent = 128
+	failureLogInterval   = time.Minute
+)
 
 // Policy answers "may this relay go there" from config.yaml, re-reading the file only when its mtime changes so
 // `sudo agentparley allow` takes effect without a restart.
@@ -22,6 +26,7 @@ type Policy struct {
 	mu       sync.Mutex
 	modTime  time.Time
 	current  *config.Config
+	failed   bool
 	loggedAt time.Time
 }
 
@@ -33,35 +38,47 @@ func NewPolicy(path string, initial *config.Config) *Policy {
 	return policy
 }
 
+// config fails closed: while the last re-read failed, allow and programs are empty (an operator who removed an
+// entry and then broke the file must not keep the old grants), until a good read restores them.
 func (p *Policy) config() *config.Config {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	info, err := os.Stat(p.path)
 	if err != nil {
-		p.logOnce(err)
+		p.fail(err)
+		return p.closed()
+	}
+	if info.ModTime().Equal(p.modTime) && !p.failed {
 		return p.current
 	}
-	if info.ModTime().Equal(p.modTime) {
-		return p.current
+	if info.ModTime().Equal(p.modTime) && p.failed {
+		p.fail(errors.New("config still unreadable"))
+		return p.closed()
 	}
 	loaded, err := config.Load(p.path)
-	if err != nil {
-		p.modTime = info.ModTime()
-		p.logOnce(err)
-		return p.current
-	}
 	p.modTime = info.ModTime()
+	if err != nil {
+		p.fail(err)
+		return p.closed()
+	}
+	p.failed = false
 	p.current = loaded
 	return p.current
 }
 
-// logOnce keeps a broken edit from flooding the journal: the last good copy stays in force and the error shows once.
-func (p *Policy) logOnce(err error) {
-	if time.Since(p.loggedAt) < time.Hour {
-		return
+func (p *Policy) fail(err error) {
+	if !p.failed || time.Since(p.loggedAt) >= failureLogInterval {
+		p.loggedAt = time.Now()
+		log.Printf("relay: refusing relays until config.yaml reads cleanly again: %v", err)
 	}
-	p.loggedAt = time.Now()
-	log.Printf("relay: keeping the previous config, could not re-read it: %v", err)
+	p.failed = true
+}
+
+func (p *Policy) closed() *config.Config {
+	closed := *p.current
+	closed.Relay.Allow = nil
+	closed.Relay.Programs = nil
+	return &closed
 }
 
 // CheckAddress returns nil when host:port may be relayed to.
