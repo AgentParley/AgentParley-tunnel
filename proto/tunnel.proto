@@ -64,7 +64,7 @@ message Operation {
 // `policy_match_command` is the RAW, unwrapped command text the agent asked for — carried purely so the daemon's
 // local `allow_commands`/`deny_commands` policy can match against what the user actually typed, not the
 // base64-wrapped shell invocation. It is NEVER executed; `command` is the only field that ever reaches shellrun.Run.
-message RunCommandCall   { string command = 1; int32 max_output_bytes = 2; string policy_match_command = 3; }
+message RunCommandCall   { string command = 1; int32 max_output_bytes = 2; string policy_match_command = 3; bytes stdin = 4; }
 message ListDirectoryCall{ string path = 1; int32 max_entries = 2; }
 message ReadFileCall     { string path = 1; int64 max_bytes = 2; }
 message WriteFileCall    { string path = 1; bytes content = 2; }
