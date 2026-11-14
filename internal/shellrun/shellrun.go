@@ -30,7 +30,7 @@ const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bi
 // Timeout enforcement kills the whole process group, not just the direct child, because the wrap text backgrounds
 // nothing itself but the agent's OWN command might (a stray `sleep 600 &`), and a lone SIGKILL to the shell would
 // orphan it.
-func Run(ctx context.Context, user *User, command string, timeoutSeconds, maxOutputBytes int, sessionID int64, workspaceSocketPath string) (*Result, error) {
+func Run(ctx context.Context, user *User, command string, stdin []byte, timeoutSeconds, maxOutputBytes int, sessionID int64, workspaceSocketPath string) (*Result, error) {
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
@@ -56,6 +56,10 @@ func Run(ctx context.Context, user *User, command string, timeoutSeconds, maxOut
 	}
 	if sessionID != 0 {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("AGENTPARLEY_SESSION_ID=%d", sessionID))
+	}
+	if len(stdin) > 0 {
+		// The platform delivers machine secrets here, never in argv or the environment, so they stay out of ps and /proc.
+		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// `a && nohup job &` leaves a subshell holding our stdout pipe until the job ends; without this the command

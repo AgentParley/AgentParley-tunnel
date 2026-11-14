@@ -148,7 +148,7 @@ func (d *Daemon) dispatchRunCommand(ctx context.Context, correlationID string, i
 		maxOutputBytes = defaultMaxOutputBytes
 	}
 
-	result, err := shellrun.Run(ctx, d.runAsUser, call.GetCommand(), timeoutSeconds, maxOutputBytes, operation.GetSessionId(), d.workspaceSocketPath)
+	result, err := shellrun.Run(ctx, d.runAsUser, call.GetCommand(), call.GetStdin(), timeoutSeconds, maxOutputBytes, operation.GetSessionId(), d.workspaceSocketPath)
 	if err != nil {
 		return errorMessage(correlationID, errorCodeInternal, fmt.Sprintf("running command: %v", err))
 	}
